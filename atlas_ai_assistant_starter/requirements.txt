@@ -1,0 +1,8 @@
+# Atlas AI Assistant — production dependencies
+fastapi>=0.135.0
+uvicorn[standard]>=0.44.0
+sqlalchemy>=2.0.49
+pydantic>=2.12.0
+pydantic-settings>=2.13.0
+httpx>=0.28.0
+python-dotenv>=1.2.0
