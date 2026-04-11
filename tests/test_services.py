@@ -5,7 +5,9 @@ from unittest.mock import patch
 import pytest
 
 from app.integrations.calendar_client import CalendarEvent
+from app.integrations.drive_client import DriveFile
 from app.services.calendar_service import CalendarService
+from app.services.drive_service import DriveService
 from app.services.inbox_service import InboxService
 from app.services.news_service import NewsService
 
@@ -170,6 +172,97 @@ def test_calendar_backward_compat(mock_calendar_events):
     ):
         result = CalendarService().get_today_agenda()
     assert "total" in result
+
+
+# ── Drive ─────────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def mock_drive_files() -> list[DriveFile]:
+    return [
+        DriveFile(
+            id="file_001",
+            name="Contrato Fornecedor A.pdf",
+            mime_type="application/pdf",
+            modified_time="2026-04-10T14:00:00Z",
+            size=204800,
+            web_view_link="https://drive.google.com/file/d/file_001/view",
+            parents=["folder_root"],
+        ),
+        DriveFile(
+            id="file_002",
+            name="Proposta Comercial Q1.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            modified_time="2026-04-09T10:30:00Z",
+            size=51200,
+            web_view_link="https://drive.google.com/file/d/file_002/view",
+            parents=["folder_root"],
+        ),
+        DriveFile(
+            id="file_003",
+            name="Planilha Budget 2026",
+            mime_type="application/vnd.google-apps.spreadsheet",
+            modified_time="2026-04-08T09:00:00Z",
+            size=None,  # Google native format has no byte size
+            web_view_link="https://drive.google.com/file/d/file_003/view",
+            parents=["folder_root"],
+        ),
+    ]
+
+
+def test_drive_list_files(mock_drive_files):
+    with patch(
+        "app.integrations.drive_client.GoogleDriveClient.list_files",
+        return_value=mock_drive_files,
+    ):
+        result = DriveService().list_files()
+    assert result["total"] == 3
+    assert isinstance(result["files"], list)
+    assert result["files"][0]["name"] == "Contrato Fornecedor A.pdf"
+    assert "summary" in result
+
+
+def test_drive_list_files_empty():
+    with patch(
+        "app.integrations.drive_client.GoogleDriveClient.list_files",
+        return_value=[],
+    ):
+        result = DriveService().list_files()
+    assert result["total"] == 0
+    assert result["files"] == []
+
+
+def test_drive_search_files(mock_drive_files):
+    contrato_files = [f for f in mock_drive_files if "Contrato" in f.name]
+    with patch(
+        "app.integrations.drive_client.GoogleDriveClient.search_files",
+        return_value=contrato_files,
+    ):
+        result = DriveService().search_files("Contrato")
+    assert result["total"] == 1
+    assert result["query"] == "Contrato"
+    assert result["files"][0]["name"] == "Contrato Fornecedor A.pdf"
+
+
+def test_drive_search_files_no_results():
+    with patch(
+        "app.integrations.drive_client.GoogleDriveClient.search_files",
+        return_value=[],
+    ):
+        result = DriveService().search_files("xyz_inexistente")
+    assert result["total"] == 0
+    assert isinstance(result["files"], list)
+
+
+def test_drive_file_size_none(mock_drive_files):
+    """Google native formats have size=None — should be handled correctly."""
+    with patch(
+        "app.integrations.drive_client.GoogleDriveClient.list_files",
+        return_value=mock_drive_files,
+    ):
+        result = DriveService().list_files()
+    spreadsheet = next(f for f in result["files"] if "Budget" in f["name"])
+    assert spreadsheet["size"] is None
 
 
 # ── News ──────────────────────────────────────────────────────────

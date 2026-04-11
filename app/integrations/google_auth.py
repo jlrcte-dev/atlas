@@ -49,6 +49,12 @@ def get_google_credentials(scopes: list[str]):
         creds = Credentials.from_authorized_user_file(str(token_path), scopes)
         logger.debug("Token loaded from %s", token_path)
 
+        # If token doesn't cover requested scopes (e.g. new integration added),
+        # discard and re-auth — avoids silent 403s on API calls
+        if creds and creds.scopes and not set(scopes).issubset(creds.scopes):
+            logger.info("Token missing required scopes %s — re-authenticating", scopes)
+            creds = None
+
     # 2. Refresh or run OAuth flow
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:

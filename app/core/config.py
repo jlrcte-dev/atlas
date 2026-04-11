@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     google_credentials_path: str = "credentials/google_oauth_credentials.json"
     google_token_path: str = "credentials/google_token.json"
     google_calendar_id: str = "primary"
+    google_drive_root_folder: str = ""  # optional: restrict Drive listing to a folder ID
     rss_default_feeds: str = ""
     timezone: str = "America/Sao_Paulo"
     log_level: str = "INFO"

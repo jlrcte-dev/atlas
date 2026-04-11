@@ -12,6 +12,8 @@ from app.api.schemas import (
     ChatRequest,
     ChatResponse,
     DailyBriefingResponse,
+    DriveFilesResponse,
+    DriveSearchResponse,
     EmailDraftRequest,
     EventProposalRequest,
     FreeSlotsResponse,
@@ -25,6 +27,7 @@ from app.integrations.telegram_bot import TelegramBot
 from app.services.approval_service import ApprovalService
 from app.services.briefing_service import BriefingService
 from app.services.calendar_service import CalendarService
+from app.services.drive_service import DriveService
 from app.services.inbox_service import InboxService
 from app.services.news_service import NewsService
 
@@ -82,6 +85,21 @@ def propose_event(
     service = ApprovalService(db)
     action = service.create_event_proposal(payload.model_dump())
     return ApprovalResponse(id=action.id, status=action.status, type=action.type)
+
+
+# ── Drive ─────────────────────────────────────────────────────────
+
+
+@router.get("/drive/files", response_model=DriveFilesResponse)
+def drive_files() -> DriveFilesResponse:
+    data = DriveService().list_files()
+    return DriveFilesResponse(**data)
+
+
+@router.get("/drive/files/search", response_model=DriveSearchResponse)
+def drive_search(q: str) -> DriveSearchResponse:
+    data = DriveService().search_files(q)
+    return DriveSearchResponse(**data)
 
 
 # ── Email Drafts ──────────────────────────────────────────────────

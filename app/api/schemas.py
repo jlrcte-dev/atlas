@@ -90,6 +90,22 @@ class ApprovalResponse(BaseModel):
     type: str
 
 
+# ── Drive ─────────────────────────────────────────────────────────
+
+
+class DriveFilesResponse(BaseModel):
+    total: int
+    files: list[dict]
+    summary: str
+
+
+class DriveSearchResponse(BaseModel):
+    total: int
+    files: list[dict]
+    query: str
+    summary: str
+
+
 # ── Errors ────────────────────────────────────────────────────────
 
 
