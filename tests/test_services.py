@@ -1,8 +1,44 @@
 """Tests for all service modules."""
 
+from unittest.mock import patch
+
+import pytest
+
+from app.integrations.calendar_client import CalendarEvent
 from app.services.calendar_service import CalendarService
 from app.services.inbox_service import InboxService
 from app.services.news_service import NewsService
+
+# ── Fixtures ──────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def mock_calendar_events() -> list[CalendarEvent]:
+    """Eventos mockados para isolar testes do CalendarService da API real."""
+    return [
+        CalendarEvent(
+            id="evt_001",
+            title="Call com equipe",
+            start="09:00",
+            end="10:00",
+            location="Google Meet",
+            attendees=["equipe@empresa.com"],
+        ),
+        CalendarEvent(
+            id="evt_002",
+            title="Almoco",
+            start="12:00",
+            end="13:00",
+        ),
+        CalendarEvent(
+            id="evt_003",
+            title="Revisao semanal",
+            start="15:00",
+            end="16:00",
+            location="Escritorio",
+            attendees=["gestor@empresa.com"],
+        ),
+    ]
 
 # ── Inbox ─────────────────────────────────────────────────────────
 
@@ -33,14 +69,23 @@ def test_inbox_backward_compat():
 # ── Calendar ──────────────────────────────────────────────────────
 
 
-def test_calendar_today():
-    result = CalendarService().get_today_events()
-    assert result["total"] >= 1
+def test_calendar_today(mock_calendar_events):
+    with patch(
+        "app.integrations.calendar_client.GoogleCalendarClient.get_today_events",
+        return_value=mock_calendar_events,
+    ):
+        result = CalendarService().get_today_events()
+    assert result["total"] == 3
     assert isinstance(result["events"], list)
+    assert result["events"][0]["title"] == "Call com equipe"
 
 
-def test_calendar_free_slots():
-    slots = CalendarService().find_free_slots(duration_minutes=60)
+def test_calendar_free_slots(mock_calendar_events):
+    with patch(
+        "app.integrations.calendar_client.GoogleCalendarClient.get_today_events",
+        return_value=mock_calendar_events,
+    ):
+        slots = CalendarService().find_free_slots(duration_minutes=60)
     assert isinstance(slots, list)
     assert len(slots) >= 1
     for slot in slots:
@@ -49,9 +94,13 @@ def test_calendar_free_slots():
         assert slot["duration_minutes"] >= 60
 
 
-def test_calendar_free_slots_long_duration():
-    slots = CalendarService().find_free_slots(duration_minutes=600)
-    # Unlikely to have a 10-hour gap, may be empty — just verify structure
+def test_calendar_free_slots_long_duration(mock_calendar_events):
+    with patch(
+        "app.integrations.calendar_client.GoogleCalendarClient.get_today_events",
+        return_value=mock_calendar_events,
+    ):
+        slots = CalendarService().find_free_slots(duration_minutes=600)
+    # Improvável ter janela de 10h — só verifica estrutura
     assert isinstance(slots, list)
 
 
@@ -62,8 +111,12 @@ def test_calendar_propose_event():
     assert proposal["attendees"] == []
 
 
-def test_calendar_backward_compat():
-    result = CalendarService().get_today_agenda()
+def test_calendar_backward_compat(mock_calendar_events):
+    with patch(
+        "app.integrations.calendar_client.GoogleCalendarClient.get_today_events",
+        return_value=mock_calendar_events,
+    ):
+        result = CalendarService().get_today_agenda()
     assert "total" in result
 
 

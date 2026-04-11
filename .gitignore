@@ -45,6 +45,8 @@ htmlcov/
 credentials.json
 token.json
 client_secret*.json
+credentials/google_oauth_credentials.json
+credentials/google_token.json
 
 # ---------- Database (SQLite local) ----------
 *.db
