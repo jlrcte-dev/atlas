@@ -1,0 +1,70 @@
+# ============================================
+# Atlas AI Assistant - .gitignore
+# ============================================
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ---------- Virtual environments ----------
+venv/
+.venv/
+env/
+.env/
+
+# ---------- Distribution / Build ----------
+dist/
+build/
+*.egg-info/
+*.egg
+
+# ---------- Testing / Coverage ----------
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+
+# ---------- Type checking / Linting ----------
+.mypy_cache/
+.ruff_cache/
+
+# ---------- IDE ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------- Secrets / Credentials ----------
+.env
+*.key
+*.pem
+credentials.json
+token.json
+client_secret*.json
+
+# ---------- Database (SQLite local) ----------
+*.db
+*.sqlite3
+
+# ---------- Docker ----------
+.docker/
+
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Generated artifacts ----------
+*.pdf
+
+# ---------- Logs ----------
+*.log
+logs/
+
+# ---------- Allowed exceptions ----------
+# .env.example DEVE ser versionado (template sem secrets)
+!.env.example
