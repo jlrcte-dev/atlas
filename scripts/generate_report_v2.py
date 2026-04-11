@@ -921,7 +921,7 @@ def build():
     pdf.h1("13. Estrutura de Arquivos")
 
     pdf.code(
-        "atlas_ai_assistant_starter/\n"
+        "atlas-ai-assistant/\n"
         "|\n"
         "|-- pyproject.toml                 Config central (ruff+mypy+pytest+bandit)\n"
         "|-- .pre-commit-config.yaml        12 hooks automaticos\n"

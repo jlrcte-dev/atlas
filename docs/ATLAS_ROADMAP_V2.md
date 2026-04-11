@@ -6,7 +6,7 @@
 
 ## DIAGNÓSTICO HONESTO
 
-### O que já existe (atlas_ai_assistant_starter)
+### O que já existe
 
 O starter kit **já tem** uma base sólida:
 
@@ -537,7 +537,7 @@ class DocumentCatalog(Base):
 ### Estrutura de pastas: O QUE MANTER
 
 ```
-atlas_ai_assistant_starter/        ← MANTER como está (renomear para atlas/)
+atlas-ai-assistant/                ← Estrutura atual (raiz do repo)
 │
 ├── app/
 │   ├── __init__.py

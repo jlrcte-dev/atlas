@@ -14,7 +14,7 @@ ATLAS é o **cérebro operacional do negócio** — um assistente inteligente qu
 
 ## Estado atual
 
-O starter kit (`atlas_ai_assistant_starter/`) já tem:
+O projeto já tem:
 
 ```
 ✅ FastAPI funcionando
@@ -38,16 +38,16 @@ O starter kit (`atlas_ai_assistant_starter/`) já tem:
 ## Leia nesta ordem
 
 ### Se você tem 10 minutos
-1. **[ATLAS_ROADMAP_V2.md](ATLAS_ROADMAP_V2.md)** — O plano real de execução
+1. **[ATLAS_ROADMAP_V2.md](docs/ATLAS_ROADMAP_V2.md)** — O plano real de execução
 
 ### Se vai implementar
-1. **[ATLAS_ROADMAP_V2.md](ATLAS_ROADMAP_V2.md)** — Roadmap semanal da Fase 1
-2. **[QUICK_REFERENCE.md](QUICK_REFERENCE.md)** — Cheat sheet para dev
-3. **[TECHNICAL_DECISIONS.md](TECHNICAL_DECISIONS.md)** — Por que cada escolha
+1. **[ATLAS_ROADMAP_V2.md](docs/ATLAS_ROADMAP_V2.md)** — Roadmap semanal da Fase 1
+2. **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)** — Cheat sheet para dev
+3. **[TECHNICAL_DECISIONS.md](docs/TECHNICAL_DECISIONS.md)** — Por que cada escolha
 
 ### Se precisa da visão de longo prazo
-1. **[EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md)** — Visão estratégica atualizada
-2. **[ATLAS_ARCHITECTURE.md](ATLAS_ARCHITECTURE.md)** — Arquitetura enterprise (horizonte 2 anos)
+1. **[EXECUTIVE_SUMMARY.md](docs/EXECUTIVE_SUMMARY.md)** — Visão estratégica atualizada
+2. **[ATLAS_ARCHITECTURE.md](docs/ATLAS_ARCHITECTURE.md)** — Arquitetura enterprise (horizonte 2 anos)
 
 ---
 
@@ -68,13 +68,13 @@ O starter kit (`atlas_ai_assistant_starter/`) já tem:
 
 | Documento | Propósito | Prioridade |
 |-----------|-----------|------------|
-| [ATLAS_ROADMAP_V2.md](ATLAS_ROADMAP_V2.md) | Plano de execução pragmático (4 fases) | **PRINCIPAL** |
-| [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | Referência rápida para devs | Alta |
-| [TECHNICAL_DECISIONS.md](TECHNICAL_DECISIONS.md) | Justificativa de cada escolha técnica | Alta |
-| [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) | Visão estratégica para stakeholders | Média |
-| [ATLAS_ARCHITECTURE.md](ATLAS_ARCHITECTURE.md) | Arquitetura enterprise (visão 2 anos) | Referência futura |
-| [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) | Roadmap original v1 (superseded by v2) | Arquivo |
-| [INDEX.md](INDEX.md) | Índice de todos os documentos | Navegação |
+| [ATLAS_ROADMAP_V2.md](docs/ATLAS_ROADMAP_V2.md) | Plano de execução pragmático (4 fases) | **PRINCIPAL** |
+| [QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md) | Referência rápida para devs | Alta |
+| [TECHNICAL_DECISIONS.md](docs/TECHNICAL_DECISIONS.md) | Justificativa de cada escolha técnica | Alta |
+| [EXECUTIVE_SUMMARY.md](docs/EXECUTIVE_SUMMARY.md) | Visão estratégica para stakeholders | Média |
+| [ATLAS_ARCHITECTURE.md](docs/ATLAS_ARCHITECTURE.md) | Arquitetura enterprise (visão 2 anos) | Referência futura |
+| [IMPLEMENTATION_ROADMAP.md](docs/IMPLEMENTATION_ROADMAP.md) | Roadmap original v1 (superseded by v2) | Arquivo |
+| [INDEX.md](docs/INDEX.md) | Índice de todos os documentos | Navegação |
 
 ---
 

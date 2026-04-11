@@ -44,7 +44,7 @@ Telegram / API
 ## Estrutura de pastas
 
 ```text
-atlas_ai_assistant_starter/
+atlas-ai-assistant/
 ├── app/
 │   ├── main.py                  ← Entry point FastAPI
 │   ├── api/
@@ -82,6 +82,8 @@ atlas_ai_assistant_starter/
 │   └── scheduler/
 │       └── jobs.py              ← Tarefas agendadas
 ├── tests/
+├── docs/
+├── scripts/
 ├── .env
 ├── requirements.txt
 ├── docker-compose.yml

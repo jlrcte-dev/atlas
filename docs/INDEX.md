@@ -12,7 +12,7 @@
 | [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | Stack atual, estrutura de pastas, comandos, troubleshooting | Enquanto programa |
 | [TECHNICAL_DECISIONS.md](TECHNICAL_DECISIONS.md) | Por que SQLite (não PostgreSQL), por que ChromaDB (não Pinecone), trade-offs | Quando precisar justificar uma escolha |
 | [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) | Visão estratégica, ecossistema, fases de evolução, custos | Para apresentar a stakeholders |
-| [START_HERE.md](START_HERE.md) | Ponto de entrada, estado atual, próximo passo concreto | Se é a primeira vez abrindo o projeto |
+| [README.md](../README.md) | Ponto de entrada, estado atual, próximo passo concreto | Se é a primeira vez abrindo o projeto |
 
 ## Documentos de Referência (visão de longo prazo)
 

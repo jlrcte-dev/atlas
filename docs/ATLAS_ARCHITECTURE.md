@@ -301,7 +301,7 @@ Rejeitado → loga e descarta
 ### Fase 1 (atual)
 
 ```text
-atlas_ai_assistant_starter/
+atlas-ai-assistant/
 ├── app/
 │   ├── main.py
 │   ├── api/          (routes, schemas)

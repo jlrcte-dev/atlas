@@ -707,7 +707,7 @@ Layer 5: Audit Trail
 ## 8. Project Structure
 
 ```
-atlas_ai_assistant_starter/
+atlas-ai-assistant/
 │
 ├── .env.example                    # Environment variable template (never commit .env)
 ├── Dockerfile                      # Single-stage Python 3.11-slim image
