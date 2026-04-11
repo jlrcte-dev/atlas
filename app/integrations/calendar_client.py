@@ -1,115 +1,78 @@
 """Google Calendar integration client.
 
-Uses Google Calendar API v3 with OAuth 2.0.
+Uses Google Calendar API v3 with OAuth 2.0 via shared google_auth module.
 
 Setup:
-  1. Baixe o arquivo OAuth credentials do Google Cloud Console
+  1. Download OAuth credentials from Google Cloud Console
      (APIs & Services > Credentials > OAuth 2.0 Client IDs > Desktop app)
-  2. Salve em credentials/google_oauth_credentials.json
-  3. Na primeira execução, o browser abrirá para autorização.
-     O token será salvo em credentials/google_token.json automaticamente.
-
-Variáveis de ambiente:
-  GOOGLE_CREDENTIALS_PATH  — path para o arquivo de credenciais OAuth (padrão: credentials/google_oauth_credentials.json)
-  GOOGLE_TOKEN_PATH        — path onde o token será salvo (padrão: credentials/google_token.json)
-  GOOGLE_CALENDAR_ID       — ID do calendário (padrão: "primary")
+  2. Save to credentials/google_oauth_credentials.json
+  3. On first run, browser opens for authorization.
+     Token is saved to credentials/google_token.json automatically.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.integrations.google_auth import get_google_credentials
 
 logger = get_logger("integrations.calendar")
 
-# Escopos necessários: leitura e escrita de eventos
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events",
 ]
+
+# Timezone offset from settings (America/Sao_Paulo = UTC-3 standard)
+_TZ_OFFSET = timezone(timedelta(hours=-3))
 
 
 @dataclass
 class CalendarEvent:
     id: str
     title: str
-    start: str  # formato HH:MM (normalizado do ISO retornado pela API)
+    start: str  # HH:MM for timed events, YYYY-MM-DD for all-day
     end: str
+    all_day: bool = False
     location: str | None = None
     attendees: list[str] = field(default_factory=list)
 
 
 def _build_service():
-    """Constrói o serviço autenticado do Google Calendar.
+    """Build authenticated Google Calendar service using shared auth."""
+    from googleapiclient.discovery import build
 
-    Tenta carregar token salvo; se ausente ou expirado, dispara fluxo OAuth.
-    Levanta RuntimeError se as credenciais não estiverem configuradas.
-    """
-    try:
-        from google.auth.transport.requests import Request
-        from google.oauth2.credentials import Credentials
-        from google_auth_oauthlib.flow import InstalledAppFlow
-        from googleapiclient.discovery import build
-    except ImportError as exc:
-        raise RuntimeError(
-            "Dependências Google ausentes. Execute: "
-            "pip install google-api-python-client google-auth-oauthlib google-auth-httplib2"
-        ) from exc
-
-    credentials_path = Path(settings.google_credentials_path)
-    token_path = Path(settings.google_token_path)
-
-    creds = None
-
-    # Carrega token existente
-    if token_path.exists():
-        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-
-    # Renova ou dispara fluxo OAuth se necessário
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not credentials_path.exists():
-                raise RuntimeError(
-                    f"Arquivo de credenciais OAuth não encontrado: {credentials_path}\n"
-                    "Baixe em: Google Cloud Console > APIs & Services > Credentials"
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
-            creds = flow.run_local_server(port=0)
-
-        # Persiste token para próximas execuções
-        token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(creds.to_json())
-        logger.info("Token OAuth salvo em %s", token_path)
-
+    creds = get_google_credentials(SCOPES)
     return build("calendar", "v3", credentials=creds)
 
 
-def _parse_event_datetime(dt_obj: dict) -> str:
-    """Extrai HH:MM de um objeto dateTime ou date da API do Google."""
+def _parse_event_time(dt_obj: dict) -> tuple[str, bool]:
+    """Parse a Google Calendar start/end object.
+
+    Returns (formatted_time, is_all_day):
+      - Timed events: ("HH:MM", False) — converted to local timezone
+      - All-day events: ("YYYY-MM-DD", True)
+    """
     if "dateTime" in dt_obj:
-        # Ex: "2026-04-11T09:00:00-03:00"
-        dt_str = dt_obj["dateTime"]
-        dt = datetime.fromisoformat(dt_str)
-        return dt.strftime("%H:%M")
-    # Evento de dia inteiro: retorna meia-noite como convenção
-    return "00:00"
+        dt = datetime.fromisoformat(dt_obj["dateTime"])
+        local_dt = dt.astimezone(_TZ_OFFSET)
+        return local_dt.strftime("%H:%M"), False
+
+    # All-day event: Google returns {"date": "2026-04-11"}
+    if "date" in dt_obj:
+        return dt_obj["date"], True
+
+    return "00:00", False
 
 
 class GoogleCalendarClient:
-    """Adapter para Google Calendar API v3.
-
-    Mantém o mesmo contrato de interface do stub anterior:
-    todos os métodos retornam CalendarEvent dataclasses ou dicts simples.
-    """
+    """Adapter for Google Calendar API v3."""
 
     def __init__(self) -> None:
-        self._service = None  # lazy init para não bloquear startup
+        self._service = None  # lazy init
 
     def _get_service(self):
         if self._service is None:
@@ -117,7 +80,7 @@ class GoogleCalendarClient:
         return self._service
 
     def get_today_events(self) -> list[CalendarEvent]:
-        """Retorna eventos do dia atual no calendário configurado."""
+        """Return today's events from the configured calendar."""
         try:
             now = datetime.now(tz=timezone.utc)
             start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -127,11 +90,11 @@ class GoogleCalendarClient:
                 time_max=end_of_day.isoformat(),
             )
         except Exception:
-            logger.exception("get_today_events falhou — retornando lista vazia")
+            logger.exception("get_today_events failed")
             return []
 
     def get_events_range(self, start_date: str, end_date: str) -> list[CalendarEvent]:
-        """Retorna eventos entre duas datas (formato ISO 8601 ou YYYY-MM-DD)."""
+        """Return events between two dates (ISO 8601 or YYYY-MM-DD)."""
         try:
             if "T" not in start_date:
                 start_date = f"{start_date}T00:00:00Z"
@@ -140,11 +103,11 @@ class GoogleCalendarClient:
             logger.info("get_events_range %s to %s", start_date, end_date)
             return self._fetch_events(time_min=start_date, time_max=end_date)
         except Exception:
-            logger.exception("get_events_range falhou — retornando lista vazia")
+            logger.exception("get_events_range failed")
             return []
 
     def _fetch_events(self, time_min: str, time_max: str) -> list[CalendarEvent]:
-        """Executa a chamada à API e converte para CalendarEvent."""
+        """Execute API call and convert to CalendarEvent list."""
         service = self._get_service()
         calendar_id = settings.google_calendar_id
 
@@ -160,29 +123,27 @@ class GoogleCalendarClient:
             .execute()
         )
 
-        items = result.get("items", [])
         events: list[CalendarEvent] = []
+        for item in result.get("items", []):
+            start_str, start_all_day = _parse_event_time(item.get("start", {}))
+            end_str, _ = _parse_event_time(item.get("end", {}))
 
-        for item in items:
-            start = item.get("start", {})
-            end = item.get("end", {})
             attendees_raw = item.get("attendees", [])
-            attendees = [
-                a.get("email", "") for a in attendees_raw if a.get("email")
-            ]
+            attendees = [a["email"] for a in attendees_raw if a.get("email")]
 
             events.append(
                 CalendarEvent(
                     id=item.get("id", ""),
-                    title=item.get("summary", "(sem título)"),
-                    start=_parse_event_datetime(start),
-                    end=_parse_event_datetime(end),
+                    title=item.get("summary", "(sem titulo)"),
+                    start=start_str,
+                    end=end_str,
+                    all_day=start_all_day,
                     location=item.get("location"),
                     attendees=attendees,
                 )
             )
 
-        logger.info("_fetch_events: %d evento(s) encontrado(s)", len(events))
+        logger.info("_fetch_events: %d event(s) found", len(events))
         return events
 
     def create_event(
@@ -193,11 +154,10 @@ class GoogleCalendarClient:
         location: str | None = None,
         attendees: list[str] | None = None,
     ) -> dict:
-        """Cria evento no Google Calendar. Deve ser chamado APENAS após aprovação."""
+        """Create event on Google Calendar. Must only be called after approval."""
         try:
             service = self._get_service()
             calendar_id = settings.google_calendar_id
-
             today = datetime.now().strftime("%Y-%m-%d")
             timezone_id = settings.timezone
 
@@ -211,18 +171,21 @@ class GoogleCalendarClient:
                 "start": {"dateTime": _to_iso(start), "timeZone": timezone_id},
                 "end": {"dateTime": _to_iso(end), "timeZone": timezone_id},
             }
-
             if location:
                 event_body["location"] = location
             if attendees:
-                event_body["attendees"] = [{"email": email} for email in attendees]
+                event_body["attendees"] = [{"email": e} for e in attendees]
 
-            created = service.events().insert(calendarId=calendar_id, body=event_body).execute()
+            created = (
+                service.events()
+                .insert(calendarId=calendar_id, body=event_body)
+                .execute()
+            )
             event_id = created.get("id", "")
-            logger.info("create_event: evento criado id=%s title=%s", event_id, title)
+            logger.info("create_event: id=%s title=%s", event_id, title)
             return {"status": "created", "event_id": event_id}
         except Exception:
-            logger.exception("create_event falhou title=%s", title)
+            logger.exception("create_event failed: title=%s", title)
             return {"status": "error", "event_id": ""}
 
     @staticmethod

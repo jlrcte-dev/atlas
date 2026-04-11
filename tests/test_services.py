@@ -21,6 +21,7 @@ def mock_calendar_events() -> list[CalendarEvent]:
             title="Call com equipe",
             start="09:00",
             end="10:00",
+            all_day=False,
             location="Google Meet",
             attendees=["equipe@empresa.com"],
         ),
@@ -29,14 +30,37 @@ def mock_calendar_events() -> list[CalendarEvent]:
             title="Almoco",
             start="12:00",
             end="13:00",
+            all_day=False,
         ),
         CalendarEvent(
             id="evt_003",
             title="Revisao semanal",
             start="15:00",
             end="16:00",
+            all_day=False,
             location="Escritorio",
             attendees=["gestor@empresa.com"],
+        ),
+    ]
+
+
+@pytest.fixture()
+def mock_calendar_events_with_allday() -> list[CalendarEvent]:
+    """Eventos mockados incluindo evento de dia inteiro."""
+    return [
+        CalendarEvent(
+            id="evt_allday",
+            title="Feriado Nacional",
+            start="2026-04-21",
+            end="2026-04-22",
+            all_day=True,
+        ),
+        CalendarEvent(
+            id="evt_001",
+            title="Call com equipe",
+            start="09:00",
+            end="10:00",
+            all_day=False,
         ),
     ]
 
@@ -109,6 +133,34 @@ def test_calendar_propose_event():
     assert proposal["title"] == "Test Meeting"
     assert proposal["status"] == "proposal_ready"
     assert proposal["attendees"] == []
+
+
+def test_calendar_allday_excluded_from_free_slots(mock_calendar_events_with_allday):
+    """All-day events should not block free slot calculation."""
+    with patch(
+        "app.integrations.calendar_client.GoogleCalendarClient.get_today_events",
+        return_value=mock_calendar_events_with_allday,
+    ):
+        slots = CalendarService().find_free_slots(duration_minutes=60)
+    # All-day event is excluded, only the 09:00-10:00 blocks time
+    # Should have slot 08:00-09:00 and 10:00-18:00
+    assert isinstance(slots, list)
+    assert len(slots) >= 1
+    starts = [s["start"] for s in slots]
+    assert "08:00" in starts
+
+
+def test_calendar_allday_event_in_response(mock_calendar_events_with_allday):
+    """All-day events should appear in the response with all_day=True."""
+    with patch(
+        "app.integrations.calendar_client.GoogleCalendarClient.get_today_events",
+        return_value=mock_calendar_events_with_allday,
+    ):
+        result = CalendarService().get_today_events()
+    allday_events = [e for e in result["events"] if e.get("all_day")]
+    assert len(allday_events) == 1
+    assert allday_events[0]["title"] == "Feriado Nacional"
+    assert allday_events[0]["start"] == "2026-04-21"
 
 
 def test_calendar_backward_compat(mock_calendar_events):
