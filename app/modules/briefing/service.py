@@ -9,9 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger, log_action
 from app.db.repositories import DailyBriefingRepository
-from app.services.calendar_service import CalendarService
-from app.services.inbox_service import InboxService
-from app.services.news_service import NewsService
+from app.modules.briefing.news_service import NewsService
+from app.modules.calendar.service import CalendarService
+from app.modules.inbox.service import InboxService
 
 logger = get_logger("services.briefing")
 

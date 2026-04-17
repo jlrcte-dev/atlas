@@ -1,6 +1,6 @@
 # ATLAS — Visão Estratégica
 
-**Versão**: 2.0 | **Abril 2026** | **Status**: Fase 1 em preparação
+**Versão**: 2.1 | **Abril 2026** | **Status**: Fase 1 concluída nas frentes principais — em refinamento
 
 ---
 
@@ -87,22 +87,24 @@ Atlas raciocina, decide com aprovação e serve como plataforma.
 
 ---
 
-## Ponto de partida
+## Estado atual
 
-O starter kit já tem uma base funcional:
+A Fase 1 foi concluída nas integrações principais. O Atlas opera com dados reais no dia a dia:
 
 ```text
 ✅ FastAPI + SQLAlchemy + SQLite
 ✅ Orchestrator + Intent Classifier
-✅ Services: Inbox, Calendar, News, Briefing, Approval
+✅ Google Calendar real (eventos + free slots)
+✅ Google Drive real (listagem + busca)
+✅ Gmail real (leitura + priorização)
+✅ RSS / News real (feedparser)
+✅ Briefing diário consolidando dados reais
+✅ Módulo de email multi-provider (Gmail + Outlook/Microsoft 365)
+✅ Autenticação Google (OAuth) e Microsoft (MSAL + PKCE)
 ✅ Telegram bot + Docker + Testes
-
-❌ Integrações são stubs (dados fake)
-❌ Google Drive não existe
-❌ Claude não está conectado
 ```
 
-**O trabalho é substituir stubs por APIs reais, não construir do zero.**
+**Próximo foco**: refinar a inteligência e a qualidade dos módulos já integrados (começando por email/inbox), não adicionar novas fontes.
 
 ---
 

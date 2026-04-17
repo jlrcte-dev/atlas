@@ -47,6 +47,7 @@ token.json
 client_secret*.json
 credentials/google_oauth_credentials.json
 credentials/google_token.json
+credentials/microsoft_token_cache.json
 
 # ---------- Database (SQLite local) ----------
 *.db

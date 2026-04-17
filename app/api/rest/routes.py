@@ -5,7 +5,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.agent.orchestrator import Orchestrator
 from app.api.schemas import (
     ApprovalResponse,
     CalendarResponse,
@@ -24,12 +23,13 @@ from app.core.exceptions import AtlasError
 from app.core.logging import get_logger
 from app.db.session import get_db
 from app.integrations.telegram_bot import TelegramBot
-from app.services.approval_service import ApprovalService
-from app.services.briefing_service import BriefingService
-from app.services.calendar_service import CalendarService
-from app.services.drive_service import DriveService
-from app.services.inbox_service import InboxService
-from app.services.news_service import NewsService
+from app.modules.approval.service import ApprovalService
+from app.modules.briefing.news_service import NewsService
+from app.modules.briefing.service import BriefingService
+from app.modules.calendar.service import CalendarService
+from app.modules.drive.service import DriveService
+from app.modules.inbox.service import InboxService
+from app.orchestrator.orchestrator import Orchestrator
 
 router = APIRouter()
 logger = get_logger("api.routes")

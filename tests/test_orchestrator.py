@@ -1,6 +1,6 @@
 """Tests for the orchestrator."""
 
-from app.agent.orchestrator import Orchestrator
+from app.orchestrator.orchestrator import Orchestrator
 
 
 def test_handle_inbox(db_session):

@@ -1,0 +1,550 @@
+openapi: "3.1.0"
+
+info:
+  title: Atlas AI Assistant — Public API
+  version: "0.2.0"
+  description: >
+    Internal REST API for Atlas AI Assistant.
+    All endpoints are single-user (no auth layer in Phase 1).
+
+tags:
+  - name: system
+  - name: orchestrator
+  - name: inbox
+  - name: calendar
+  - name: drive
+  - name: approvals
+  - name: news
+  - name: briefing
+  - name: jobs
+  - name: telegram
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: health
+      tags: [system]
+      responses:
+        "200":
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /chat:
+    post:
+      summary: Natural language interaction — main orchestrator entry point
+      operationId: chat
+      tags: [orchestrator]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+      responses:
+        "200":
+          description: Classified intent and response message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+
+  /inbox/summary:
+    get:
+      summary: Gmail inbox summary with priority breakdown
+      operationId: inbox_summary
+      tags: [inbox]
+      responses:
+        "200":
+          description: Inbox summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxSummaryResponse"
+
+  /calendar/today:
+    get:
+      summary: Today's calendar events
+      operationId: calendar_today
+      tags: [calendar]
+      responses:
+        "200":
+          description: Today's events list and summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarResponse"
+
+  /calendar/free-slots:
+    get:
+      summary: Available time slots for today within work hours (08:00–18:00)
+      operationId: calendar_free_slots
+      tags: [calendar]
+      parameters:
+        - name: duration
+          in: query
+          description: Minimum slot duration in minutes
+          required: false
+          schema:
+            type: integer
+            default: 60
+      responses:
+        "200":
+          description: List of available time slots
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FreeSlotsResponse"
+
+  /calendar/propose-event:
+    post:
+      summary: Propose a new calendar event — creates a draft pending human approval
+      operationId: propose_event
+      tags: [calendar]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventProposalRequest"
+      responses:
+        "200":
+          description: Draft action created in pending state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalResponse"
+
+  /drive/files:
+    get:
+      summary: List files from Google Drive (root or configured folder)
+      operationId: drive_files
+      tags: [drive]
+      responses:
+        "200":
+          description: File listing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriveFilesResponse"
+
+  /drive/files/search:
+    get:
+      summary: Search files in Google Drive by name
+      operationId: drive_search
+      tags: [drive]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: Search term matched against file names
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Matching files
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriveSearchResponse"
+
+  /drafts/email:
+    post:
+      summary: Create an email draft — pending human approval before sending
+      operationId: create_email_draft
+      tags: [approvals]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailDraftRequest"
+      responses:
+        "200":
+          description: Draft action created in pending state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalResponse"
+
+  /approvals/{draft_id}/approve:
+    post:
+      summary: Approve a pending draft action
+      operationId: approve_action
+      tags: [approvals]
+      parameters:
+        - name: draft_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Action approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalResponse"
+        "404":
+          description: Draft not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "400":
+          description: Action already resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /approvals/{draft_id}/reject:
+    post:
+      summary: Reject a pending draft action
+      operationId: reject_action
+      tags: [approvals]
+      parameters:
+        - name: draft_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Action rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalResponse"
+        "404":
+          description: Draft not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "400":
+          description: Action already resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /news:
+    get:
+      summary: Fetch and categorize RSS news briefing
+      operationId: news
+      tags: [news]
+      responses:
+        "200":
+          description: News briefing by category
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewsBriefingResponse"
+
+  /news/briefing:
+    get:
+      summary: Alias for GET /news
+      operationId: news_briefing
+      tags: [news]
+      responses:
+        "200":
+          description: News briefing by category
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewsBriefingResponse"
+
+  /briefing:
+    get:
+      summary: Generate and persist daily consolidated briefing
+      operationId: get_briefing
+      tags: [briefing]
+      responses:
+        "200":
+          description: Daily briefing with inbox, calendar, and news sections
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailyBriefingResponse"
+
+  /jobs/run-daily-briefing:
+    post:
+      summary: Trigger daily briefing generation (job endpoint)
+      operationId: run_daily_briefing
+      tags: [jobs]
+      responses:
+        "200":
+          description: Daily briefing result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailyBriefingResponse"
+
+  /telegram/webhook:
+    post:
+      summary: Telegram Bot webhook — receives updates from the Telegram API
+      operationId: telegram_webhook
+      tags: [telegram]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Telegram Update object (see Telegram Bot API docs)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+
+components:
+  schemas:
+
+    ChatRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          minLength: 1
+          description: Natural language message or slash command
+        user_id:
+          type: string
+          default: default
+          description: Caller identifier (single-user in Phase 1)
+
+    ChatResponse:
+      type: object
+      properties:
+        intent:
+          type: string
+          description: Classified intent (e.g. get_inbox_summary)
+        confidence:
+          type: number
+          format: float
+          description: Classifier confidence score (0.0–1.0)
+        success:
+          type: boolean
+        data:
+          type: object
+          description: Structured payload — shape varies by intent
+        message:
+          type: string
+          description: Human-readable response text
+
+    InboxSummaryResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        high_priority:
+          type: integer
+        medium_priority:
+          type: integer
+        low_priority:
+          type: integer
+        unread:
+          type: integer
+        items:
+          type: array
+          items:
+            type: object
+        action_items:
+          type: array
+          items:
+            type: object
+        summary:
+          type: string
+
+    CalendarResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        events:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              title:
+                type: string
+              start:
+                type: string
+                description: HH:MM for timed events, YYYY-MM-DD for all-day
+              end:
+                type: string
+              all_day:
+                type: boolean
+              location:
+                type: string
+                nullable: true
+              attendees:
+                type: array
+                items:
+                  type: string
+        summary:
+          type: string
+
+    FreeSlotsResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        slots:
+          type: array
+          items:
+            type: object
+            properties:
+              start:
+                type: string
+                example: "08:00"
+              end:
+                type: string
+                example: "09:00"
+              duration_minutes:
+                type: integer
+
+    EventProposalRequest:
+      type: object
+      required: [title, start, end]
+      properties:
+        title:
+          type: string
+        start:
+          type: string
+          description: ISO 8601 datetime or HH:MM
+        end:
+          type: string
+          description: ISO 8601 datetime or HH:MM
+        attendees:
+          type: array
+          items:
+            type: string
+          default: []
+        location:
+          type: string
+          nullable: true
+
+    NewsBriefingResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        categories:
+          type: object
+          description: Category name → article count
+        items:
+          type: array
+          items:
+            type: object
+        summary:
+          type: string
+
+    DailyBriefingResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: Persisted briefing record ID
+        content:
+          type: string
+          description: Full briefing as plain text
+        sections:
+          type: object
+          description: Structured sections (inbox, calendar, news, free_slots)
+
+    EmailDraftRequest:
+      type: object
+      required: [to, subject, body]
+      properties:
+        to:
+          type: string
+          description: Recipient email address
+        subject:
+          type: string
+        body:
+          type: string
+
+    ApprovalResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: Draft action ID
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        type:
+          type: string
+          description: Action type (draft_email, create_event)
+
+    DriveFilesResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              mime_type:
+                type: string
+              modified_time:
+                type: string
+              size:
+                type: integer
+                nullable: true
+              web_view_link:
+                type: string
+              parents:
+                type: array
+                items:
+                  type: string
+        summary:
+          type: string
+
+    DriveSearchResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        files:
+          type: array
+          items:
+            type: object
+        query:
+          type: string
+        summary:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error code
+        message:
+          type: string
+          description: Human-readable error message

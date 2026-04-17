@@ -2,7 +2,7 @@
 name = "atlas-ai-assistant"
 version = "0.2.0"
 description = "Personal operational AI assistant powered by Claude"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 
 dependencies = [
     "fastapi>=0.135.0",
@@ -15,6 +15,7 @@ dependencies = [
     "google-api-python-client>=2.150.0",
     "google-auth-httplib2>=0.2.0",
     "google-auth-oauthlib>=1.2.0",
+    "anthropic>=0.50.0",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +26,10 @@ dev = [
     "pip-audit>=2.10.0",
     "pre-commit>=4.5.0",
     "dotenv-linter>=0.7.0",
+    # Windows only: injects system certificates into ssl so requests accepts
+    # antivirus/proxy MITM certs. Required locally when SSLError occurs on
+    # oauth2.googleapis.com. Has no effect on Linux/macOS.
+    "pip-system-certs>=5.0",
 ]
 test = [
     "pytest>=9.0.0",
@@ -43,9 +48,10 @@ include = ["app*"]
 # ═══════════════════════════════════════════════════════════════════
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 100
 src = ["app", "tests"]
+exclude = ["scripts/", ".venv/", "htmlcov/"]
 
 [tool.ruff.lint]
 select = [
@@ -70,6 +76,7 @@ ignore = [
     "B008",   # function call in default arg (FastAPI Depends pattern)
     "RET504", # unnecessary assignment before return
     "UP007",  # use X | Y for union types (already used)
+    "UP017",  # datetime.UTC alias — codebase uses both styles (pre-existing)
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -80,6 +87,9 @@ ignore = [
 ]
 "app/integrations/**/*.py" = [
     "T201",   # print statements in stubs (if any)
+]
+"app/core/config.py" = [
+    "S105",   # google_token_path is a file path, not a credential
 ]
 
 [tool.ruff.lint.isort]
@@ -95,7 +105,7 @@ docstring-code-format = true
 # ═══════════════════════════════════════════════════════════════════
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = false
 warn_return_any = true
 warn_unused_configs = true

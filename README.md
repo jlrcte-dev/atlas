@@ -1,6 +1,6 @@
 # ATLAS — Comece Aqui
 
-**Versão**: 2.0 | **Abril 2026** | **Abordagem**: Execução pragmática
+**Versão**: 2.1 | **Abril 2026** | **Abordagem**: Execução pragmática | **Status**: Fase 1 concluída nas integrações principais
 
 ---
 
@@ -14,24 +14,23 @@ ATLAS é o **cérebro operacional do negócio** — um assistente inteligente qu
 
 ## Estado atual
 
-O projeto já tem:
+As integrações principais saíram da fase de stubs e operam com dados reais:
 
 ```
-✅ FastAPI funcionando
-✅ Orchestrator com intent classification
-✅ Services: Inbox, Calendar, News, Briefing, Approval
-✅ SQLAlchemy + SQLite
-✅ Telegram bot
-✅ Docker
-✅ Testes
-
-❌ Todas as integrações são STUBS (dados fake)
-❌ Google Drive não existe
-❌ Claude não está conectado
-❌ Nenhum dado real flui pelo sistema
+✅ FastAPI + Orchestrator + intent classification
+✅ SQLAlchemy + SQLite + Telegram bot + Docker + Testes
+✅ Google Calendar real (eventos + free slots)
+✅ Google Drive real (listagem + busca)
+✅ Gmail real (leitura + classificacao de prioridade)
+✅ RSS / News real (feedparser)
+✅ Briefing diario real (consolida Calendar + Inbox + News)
+✅ Modulo de email multi-provider (Gmail + Outlook/Microsoft 365)
+✅ Autenticacao Google (OAuth) e Microsoft (MSAL + PKCE) funcionais
+✅ Troca de provider de email por configuracao (EMAIL_PROVIDER)
+✅ InboxService e Briefing preservados sem regressao
 ```
 
-**O trabalho da Fase 1 é substituir stubs por realidade.**
+**A Fase 1 foi concluida nas frentes principais.** O próximo foco natural é refinar a qualidade e inteligência dos módulos já integrados — começando por email/inbox.
 
 ---
 
@@ -53,13 +52,17 @@ O projeto já tem:
 
 ## Próximo passo concreto
 
-```
-1. Criar projeto no Google Cloud Console
-2. Ativar Calendar API + Drive API + Gmail API
-3. Gerar credentials.json (OAuth2)
-4. Obter ANTHROPIC_API_KEY
-5. Reescrever calendar_client.py com API real
-6. Testar: GET /calendar/today → dados reais
+A Fase 1 de integração real foi essencialmente concluída. O Atlas entrou na fase de **refinamento dos módulos e aumento de inteligência**.
+
+Próximo foco natural: melhorar a qualidade dos módulos já integrados, começando por **email/inbox** (classificação mais inteligente, priorização contextual, summarization).
+
+Para ativar a integração Outlook (opcional):
+
+```text
+1. Registrar app no Azure AD (Mobile and desktop applications, Mail.Read)
+2. Definir MICROSOFT_CLIENT_ID no .env
+3. Rodar: python scripts/auth_microsoft.py
+4. Definir EMAIL_PROVIDER=outlook no .env
 ```
 
 ---

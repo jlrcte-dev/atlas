@@ -6,10 +6,10 @@ import pytest
 
 from app.integrations.calendar_client import CalendarEvent
 from app.integrations.drive_client import DriveFile
-from app.services.calendar_service import CalendarService
-from app.services.drive_service import DriveService
-from app.services.inbox_service import InboxService
-from app.services.news_service import NewsService
+from app.modules.briefing.news_service import NewsService
+from app.modules.calendar.service import CalendarService
+from app.modules.drive.service import DriveService
+from app.modules.inbox.service import InboxService
 
 # ── Fixtures ──────────────────────────────────────────────────────
 

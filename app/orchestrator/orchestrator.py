@@ -8,14 +8,15 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.agent.intent_classifier import ClassifiedIntent, Intent, IntentClassifier
 from app.core.exceptions import AtlasError
 from app.core.logging import get_logger, log_action
-from app.services.approval_service import ApprovalService
-from app.services.briefing_service import BriefingService
-from app.services.calendar_service import CalendarService
-from app.services.inbox_service import InboxService
-from app.services.news_service import NewsService
+from app.integrations.claude_client import ClaudeClient
+from app.modules.approval.service import ApprovalService
+from app.modules.briefing.news_service import NewsService
+from app.modules.briefing.service import BriefingService
+from app.modules.calendar.service import CalendarService
+from app.modules.inbox.service import InboxService
+from app.orchestrator.intent_classifier import ClassifiedIntent, Intent, IntentClassifier
 
 logger = get_logger("agent.orchestrator")
 
@@ -26,18 +27,43 @@ class Orchestrator:
     def __init__(self, db: Session) -> None:
         self.db = db
         self.classifier = IntentClassifier()
+        self.claude = ClaudeClient()
         self.inbox = InboxService()
         self.calendar = CalendarService()
         self.news = NewsService()
         self.briefing = BriefingService(db)
         self.approval = ApprovalService(db)
 
+    def _classify_with_fallback(self, message: str) -> ClassifiedIntent:
+        """Classify intent using Claude first, then rule-based fallback.
+
+        Slash commands always use rule-based (fast, reliable, no API cost).
+        Natural language attempts Claude first; falls back on any failure or UNKNOWN.
+        """
+        if message.strip().startswith("/"):
+            return self.classifier.classify(message)
+
+        result = self.claude.classify_intent(message)
+        if result:
+            try:
+                intent = Intent(result["intent"])
+                if intent != Intent.UNKNOWN:
+                    return ClassifiedIntent(
+                        intent=intent,
+                        confidence=float(result.get("confidence", 0.85)),
+                        params=result.get("params", {}),
+                    )
+            except (ValueError, KeyError):
+                pass
+
+        return self.classifier.classify(message)
+
     def handle_request(self, user_id: str, message: str) -> dict:
         """Classify intent and route to the appropriate handler.
 
         Returns a dict with keys: intent, confidence, success, data, message.
         """
-        classified = self.classifier.classify(message)
+        classified = self._classify_with_fallback(message)
 
         log_action(
             logger,

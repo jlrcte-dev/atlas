@@ -1,14 +1,57 @@
 # ATLAS — Roadmap Pragmático de Execução
 
-**Versão**: 2.0 | **Data**: Abril 2026 | **Realidade**: Equipe pequena, execução real
+**Versão**: 2.1 | **Data**: Abril 2026 | **Status**: Fase 1 concluída nas frentes principais
 
 ---
 
-## DIAGNÓSTICO HONESTO
+## MILESTONES CONCLUÍDOS
 
-### O que já existe
+A Fase 1 avançou em passos incrementais, sempre preservando contratos e sem regressões. Os milestones abaixo estão **validados em execução real**.
 
-O starter kit **já tem** uma base sólida:
+### ✅ Milestone 1 — Integrações reais core concluídas
+
+- Google Calendar real (eventos + free slots)
+- Google Drive real (listagem + busca)
+- Gmail real (leitura + classificação de prioridade)
+- RSS / News real (feedparser)
+- Briefing diário consolidando dados reais
+
+### ✅ Milestone 2 — Módulo de email multi-provider concluído
+
+Refatoração incremental do módulo de email em 6 passos controlados:
+
+1. Extração de `EmailMessage` para módulo próprio (`email_models.py`)
+2. Criação de `BaseEmailClient` (Protocol estrutural)
+3. Adaptação do `InboxService` com factory simples e `email_provider`
+4. Implementação da autenticação Microsoft com MSAL + PKCE
+5. Implementação do `OutlookClient` (MS Graph, somente leitura)
+6. Integração do `OutlookClient` ao `InboxService` via factory
+
+Resultado: Gmail preservado, Outlook adicionado, seleção por provider funcional. Zero regressão em briefing, inbox ou contratos (`/inbox/summary` intocado).
+
+### ✅ Milestone 3 — Autenticação Microsoft concluída
+
+- App registrado no Azure AD (Mobile and desktop applications)
+- Permissão delegada `Mail.Read` validada
+- Fluxo interativo funcionando via `scripts/auth_microsoft.py`
+- Token/cache Microsoft persistido em `credentials/microsoft_token_cache.json`
+- Outlook validado em execução real com conta Microsoft
+
+### ✅ Milestone 4 — Atlas operacional no mundo real
+
+- Sistema não depende mais de stubs nas integrações principais
+- Opera com dados reais em todas as frentes core
+- Base pronta para evolução de **inteligência e priorização**
+
+**Próximo foco natural**: refinamento dos módulos já integrados — qualidade da classificação de emails, priorização contextual, summarization. Não adicionar novas fontes.
+
+---
+
+## DIAGNÓSTICO HISTÓRICO
+
+Seção mantida como registro da situação inicial do projeto (pré-Fase 1).
+
+### O que já existia no starter kit
 
 ```
 ✅ FastAPI funcionando com rotas definidas
@@ -23,19 +66,17 @@ O starter kit **já tem** uma base sólida:
 ✅ Testes unitários
 ```
 
-### O que NÃO funciona
+### O que era stub no início da Fase 1
 
-Tudo que toca o mundo real é **stub** (dados fake):
+Tudo que tocava o mundo real era stub — **todos os itens abaixo já foram substituídos por integrações reais**:
 
 ```
-❌ GoogleCalendarClient → retorna 3 eventos hardcoded
-❌ GmailClient → retorna 2 emails hardcoded
-❌ GoogleWorkspaceMCPClient → mock
-❌ RSSClient → mock
-❌ Claude → configurado mas NÃO conectado
-❌ Google Drive → não existe
-❌ Gerenciamento de documentos → não existe
-❌ Base de conhecimento → não existe
+✅ GoogleCalendarClient (stub → Google Calendar API real)
+✅ GmailClient (stub → Gmail API real)
+✅ RSSClient (stub → feedparser real)
+✅ Claude (não conectado → conectado via Anthropic SDK)
+✅ Google Drive (não existia → integração real implementada)
+✅ Outlook / Microsoft 365 (não existia → integração real implementada)
 ```
 
 ### O problema da arquitetura anterior (v1)
@@ -76,9 +117,11 @@ Nenhuma fase depende de tecnologia que ainda não foi validada.
 
 ---
 
-## FASE 1 — ATLAS OPERACIONAL (Semanas 1-4)
+## FASE 1 — ATLAS OPERACIONAL (Semanas 1-4) ✅ CONCLUÍDA
 
-### Objetivo
+> **Status**: concluída nas frentes principais. As entregas listadas abaixo foram validadas em execução real. O módulo de email evoluiu além do escopo original, ganhando suporte multi-provider (Gmail + Outlook) — ver seção "Milestones Concluídos" no topo deste documento.
+
+### Objetivo (original)
 
 **Atlas funciona como assistente real no dia a dia.**
 

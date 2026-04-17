@@ -1,10 +1,12 @@
 # ATLAS — Roadmap de Implementação
 
-**Versão**: 2.0 | **Abril 2026**
+**Versão**: 2.1 | **Abril 2026** | **Status**: Fase 1 concluída nas frentes principais
 
 > **NOTA**: Este documento foi atualizado para refletir a abordagem pragmática.
 > O plano detalhado de execução está em [ATLAS_ROADMAP_V2.md](ATLAS_ROADMAP_V2.md).
 > A arquitetura enterprise de longo prazo está em [ATLAS_ARCHITECTURE.md](ATLAS_ARCHITECTURE.md).
+>
+> **Milestones concluídos**: Calendar, Drive, Gmail, RSS, Briefing reais + módulo de email multi-provider (Gmail + Outlook) + autenticação Microsoft. Ver seção "Milestones Concluídos" em [ATLAS_ROADMAP_V2.md](ATLAS_ROADMAP_V2.md).
 
 ---
 
@@ -19,11 +21,13 @@ Fase 4 (Sem 15+)   → Avançado        → Agentes + multi-user + SaaS
 
 ---
 
-## Fase 1 — Operacional (Semanas 1-4)
+## Fase 1 — Operacional (Semanas 1-4) ✅ CONCLUÍDA
 
 ### Objetivo
 
 Substituir todos os stubs por integrações reais. Atlas funciona no dia a dia.
+
+**Resultado**: entregue. Calendar, Drive, Gmail, RSS e Briefing operam com dados reais. Módulo de email evoluiu para multi-provider (Gmail + Outlook) com autenticação Microsoft validada.
 
 ### Semana 1: Google Calendar + Claude
 
@@ -60,19 +64,29 @@ Substituir todos os stubs por integrações reais. Atlas funciona no dia a dia.
 | 3 | Docker Compose atualizado, health check | `docker compose up` funciona |
 | 4-5 | Uso real por 2 dias, anotar ajustes | Lista de melhorias para Fase 2 |
 
-### Definition of Done — Fase 1
+### Definition of Done — Fase 1 ✅
 
 ```text
-□ GET /calendar/today → eventos reais
-□ GET /drive/files → arquivos reais
-□ GET /inbox/summary → emails reais
-□ GET /news → notícias reais
-□ GET /briefing → briefing completo com dados reais
-□ POST /chat → conversa natural via Claude
-□ Zero stubs em produção
-□ Audit log registra todas as operações
-□ Funciona via Telegram
-□ Testes passam
+☑ GET /calendar/today → eventos reais
+☑ GET /drive/files → arquivos reais
+☑ GET /inbox/summary → emails reais (Gmail ou Outlook — multi-provider)
+☑ GET /news → notícias reais
+☑ GET /briefing → briefing completo com dados reais
+☑ POST /chat → conversa natural via Claude
+☑ Zero stubs nas integrações principais
+☑ Audit log registra todas as operações
+☑ Funciona via Telegram
+☑ Testes passam
+```
+
+**Escopo adicional entregue além do DoD original:**
+
+```text
+☑ Módulo de email multi-provider (BaseEmailClient Protocol)
+☑ OutlookClient (MS Graph, somente leitura)
+☑ Autenticação Microsoft (MSAL + PKCE, sem client_secret)
+☑ Seleção de provider via EMAIL_PROVIDER no .env
+☑ Briefing e InboxService preservados (zero regressão)
 ```
 
 ---

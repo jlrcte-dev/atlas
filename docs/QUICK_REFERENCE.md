@@ -1,6 +1,8 @@
 # ATLAS — Referência Rápida
 
-**Stack atual**: Python 3.11 + FastAPI + SQLite + Claude API + Google APIs
+**Stack atual**: Python 3.11 + FastAPI + SQLite + Claude API + Google APIs + Microsoft Graph (via MSAL)
+
+**Status**: Fase 1 concluída nas integrações principais. Sistema opera com dados reais.
 
 ---
 
@@ -66,11 +68,15 @@ atlas-ai-assistant/
 │   │   └── session.py           ← Engine + get_db
 │   ├── integrations/
 │   │   ├── calendar_client.py   ← Google Calendar API
-│   │   ├── drive_client.py      ← Google Drive API (NOVO)
+│   │   ├── drive_client.py      ← Google Drive API
 │   │   ├── gmail_client.py      ← Gmail API
-│   │   ├── claude_client.py     ← Claude API (NOVO)
-│   │   ├── google_auth.py       ← Auth compartilhada (NOVO)
-│   │   ├── rss_reader.py        ← RSS feeds
+│   │   ├── outlook_client.py    ← Microsoft Graph (Outlook)
+│   │   ├── email_models.py      ← EmailMessage (provider-agnostic)
+│   │   ├── base_email_client.py ← BaseEmailClient Protocol
+│   │   ├── claude_client.py     ← Claude API
+│   │   ├── google_auth.py       ← Google OAuth compartilhada
+│   │   ├── microsoft_auth.py    ← Microsoft OAuth (MSAL + PKCE)
+│   │   ├── rss_client.py        ← RSS feeds (feedparser)
 │   │   └── telegram_bot.py      ← Telegram Bot
 │   ├── services/
 │   │   ├── calendar_service.py  ← Agenda, free slots
@@ -171,10 +177,18 @@ LOG_LEVEL=INFO
 ANTHROPIC_API_KEY=sk-ant-...
 
 # Google
-GOOGLE_CREDENTIALS_PATH=./credentials.json
-GOOGLE_TOKEN_PATH=./token.json
+GOOGLE_CREDENTIALS_PATH=credentials/google_oauth_credentials.json
+GOOGLE_TOKEN_PATH=credentials/google_token.json
 GOOGLE_CALENDAR_ID=primary
 GOOGLE_DRIVE_ROOT_FOLDER=
+
+# Microsoft Graph (Outlook) — PublicClientApplication + PKCE, sem client_secret
+MICROSOFT_CLIENT_ID=
+MICROSOFT_TENANT=common
+MICROSOFT_TOKEN_CACHE_PATH=credentials/microsoft_token_cache.json
+
+# Provider de email (gmail | outlook)
+EMAIL_PROVIDER=gmail
 
 # Telegram
 TELEGRAM_BOT_TOKEN=
@@ -239,29 +253,27 @@ Reavaliar todas as decisões com base em dados reais de uso.
 
 ---
 
-## Checklist de progresso — Fase 1
+## Checklist de progresso — Fase 1 ✅ CONCLUÍDA
 
 ```text
-Semana 1:
-  □ Google Calendar API real funcionando
-  □ Claude conectado ao Orchestrator
-  □ GET /calendar/today retorna dados reais
+Integrações core:
+  ☑ Google Calendar API real
+  ☑ Google Drive API real
+  ☑ Gmail API real
+  ☑ RSS real (feedparser)
+  ☑ Briefing diário consolidando dados reais
+  ☑ Claude conectado (classificação de intents + respostas)
 
-Semana 2:
-  □ Google Drive API funcionando
-  □ DriveService + rotas
-  □ DocumentCatalog no SQLite
-  □ Busca e categorização
+Módulo de email multi-provider:
+  ☑ BaseEmailClient (Protocol estrutural)
+  ☑ EmailMessage isolado em email_models.py
+  ☑ InboxService com factory por EMAIL_PROVIDER
+  ☑ OutlookClient (MS Graph, somente leitura)
+  ☑ Autenticação Microsoft (MSAL + PKCE)
+  ☑ Gmail preservado, briefing sem regressão
 
-Semana 3:
-  □ Gmail API real
-  □ RSS real (feedparser)
-  □ Briefing diário com dados 100% reais
-  □ Zero stubs restantes
-
-Semana 4:
-  □ Error handling robusto
-  □ Deploy estável
-  □ Uso real por 2+ dias
-  □ Lista de ajustes para Fase 2
+Próximo foco (refinamento, não expansão):
+  □ Classificação de prioridade mais inteligente (Claude-based)
+  □ Sumarização contextual de emails
+  □ Priorização cross-source (agenda + inbox)
 ```

@@ -1,6 +1,6 @@
 """Tests for the intent classification layer."""
 
-from app.agent.intent_classifier import Intent, IntentClassifier
+from app.orchestrator.intent_classifier import Intent, IntentClassifier
 
 
 def _classify(msg: str) -> Intent:

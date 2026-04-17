@@ -3,7 +3,7 @@
 import pytest
 
 from app.core.exceptions import ActionAlreadyResolvedError
-from app.services.approval_service import ApprovalService
+from app.modules.approval.service import ApprovalService
 
 # ── Creation ──────────────────────────────────────────────────────
 

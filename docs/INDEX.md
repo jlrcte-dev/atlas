@@ -1,6 +1,6 @@
 # ATLAS — Índice de Documentação
 
-**Atualizado**: Abril 2026 | **Abordagem ativa**: Roadmap Pragmático v2
+**Atualizado**: Abril 2026 | **Abordagem ativa**: Roadmap Pragmático v2 | **Status**: Fase 1 concluída nas frentes principais — em refinamento
 
 ---
 
@@ -25,10 +25,15 @@
 
 ## Guia rápido por papel
 
-**Estou implementando a Fase 1:**
+**Quero entender o estado atual do projeto:**
 
-1. [ATLAS_ROADMAP_V2.md](ATLAS_ROADMAP_V2.md) — Seção "Roadmap Semanal — Fase 1"
-2. [QUICK_REFERENCE.md](QUICK_REFERENCE.md) — Stack, comandos, estrutura
+1. [ATLAS_ROADMAP_V2.md](ATLAS_ROADMAP_V2.md) — Seção "Milestones Concluídos" (no topo)
+2. [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) — Seção "Estado atual"
+
+**Estou implementando refinamentos sobre a Fase 1:**
+
+1. [QUICK_REFERENCE.md](QUICK_REFERENCE.md) — Stack, comandos, estrutura, checklist atualizado
+2. [TECHNICAL_DECISIONS.md](TECHNICAL_DECISIONS.md) — Trade-offs em vigor
 
 **Preciso tomar uma decisão técnica:**
 
