@@ -89,7 +89,7 @@ Atlas raciocina, decide com aprovação e serve como plataforma.
 
 ## Estado atual
 
-A Fase 1 foi concluída nas integrações principais. O Atlas opera com dados reais no dia a dia:
+A fase de **integração real + estabilização core** está concluída. O Atlas opera com dados reais de forma estável:
 
 ```text
 ✅ FastAPI + SQLAlchemy + SQLite
@@ -101,10 +101,19 @@ A Fase 1 foi concluída nas integrações principais. O Atlas opera com dados re
 ✅ Briefing diário consolidando dados reais
 ✅ Módulo de email multi-provider (Gmail + Outlook/Microsoft 365)
 ✅ Autenticação Google (OAuth) e Microsoft (MSAL + PKCE)
+✅ Briefing resiliente a falhas de inbox (fallback seguro)
+✅ Priorização de email corrigida e alinhada entre providers
 ✅ Telegram bot + Docker + Testes
 ```
 
-**Próximo foco**: refinar a inteligência e a qualidade dos módulos já integrados (começando por email/inbox), não adicionar novas fontes.
+## Transição de Fase
+
+O Atlas entra agora em uma nova etapa:
+
+**→ Evolução qualitativa dos módulos já integrados**
+**→ Foco em inteligência, priorização e qualidade dos dados**
+
+O sistema está estável. A próxima alavanca de valor não é adicionar novas fontes — é tornar os dados que já chegam mais úteis e acionáveis.
 
 ---
 

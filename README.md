@@ -27,10 +27,26 @@ As integrações principais saíram da fase de stubs e operam com dados reais:
 ✅ Modulo de email multi-provider (Gmail + Outlook/Microsoft 365)
 ✅ Autenticacao Google (OAuth) e Microsoft (MSAL + PKCE) funcionais
 ✅ Troca de provider de email por configuracao (EMAIL_PROVIDER)
-✅ InboxService e Briefing preservados sem regressao
+✅ Briefing resiliente a falhas de inbox (fallback seguro, sem derrubada)
+✅ Bug critico de prioridade corrigido (Gmail e Outlook alinhados)
+✅ Token Outlook resiliente (sem expiracao apos ~1h de servidor)
 ```
 
-**A Fase 1 foi concluida nas frentes principais.** O próximo foco natural é refinar a qualidade e inteligência dos módulos já integrados — começando por email/inbox.
+**A fase de integração real + estabilização core está concluída.**
+
+---
+
+## Transição de Fase
+
+O Atlas entra agora em uma nova etapa:
+
+**→ Evolução qualitativa dos módulos já integrados**
+**→ Foco em inteligência, priorização e qualidade dos dados**
+
+Próximos passos naturais (refinamento, não expansão):
+- Classificação de prioridade contextual (Claude-based)
+- Sumarização inteligente de emails no Briefing
+- Correlação agenda ↔ inbox para priorização cruzada
 
 ---
 

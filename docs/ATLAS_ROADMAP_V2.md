@@ -43,7 +43,31 @@ Resultado: Gmail preservado, Outlook adicionado, seleção por provider funciona
 - Opera com dados reais em todas as frentes core
 - Base pronta para evolução de **inteligência e priorização**
 
-**Próximo foco natural**: refinamento dos módulos já integrados — qualidade da classificação de emails, priorização contextual, summarization. Não adicionar novas fontes.
+### ✅ Milestone 5 — Estabilização e hardening operacional (pós-auditoria)
+
+Correções aplicadas após auditoria técnica do módulo de email:
+
+- **Bug crítico de prioridade corrigido**: `GmailClient._classify_priority` classificava todos os emails lidos como "alta" — corrigido; Gmail e Outlook agora produzem resultados idênticos para os mesmos inputs
+- **Briefing resiliente a falhas de inbox**: `InboxService.summarize_emails` agora retorna fallback seguro em caso de falha da API — `/briefing` não derruba mais quando o email está indisponível
+- **Token Outlook resiliente**: token Microsoft migrado do `__init__` para cada request via MSAL — sem expiração silenciosa após ~1h de servidor em execução
+
+---
+
+## TRANSIÇÃO DE FASE
+
+A fase de **integração real + estabilização core** está formalmente encluída.
+
+O Atlas entra agora em uma nova etapa:
+
+**→ Evolução qualitativa dos módulos já integrados**
+**→ Foco em inteligência, priorização e qualidade dos dados**
+
+Isso significa: melhorar o que já existe — não adicionar novas fontes ou integrações.
+
+Exemplos concretos de próximos passos:
+- Classificação de prioridade contextual (Claude-based, não apenas por palavras-chave)
+- Sumarização inteligente de emails para o Briefing
+- Correlação agenda ↔ inbox (ex: email sobre reunião de hoje = alta prioridade)
 
 ---
 
