@@ -62,14 +62,13 @@ class OutlookClient:
         timestamp = msg.get("receivedDateTime") or ""
         is_read = bool(msg.get("isRead", False))
         sender = self._format_sender(msg.get("from"))
-        priority = self._classify_priority(sender, subject, snippet, is_read)
 
         return EmailMessage(
             id=msg_id,
             sender=sender,
             subject=subject,
             snippet=snippet,
-            priority=priority,
+            priority="baixa",
             timestamp=timestamp,
             is_read=is_read,
         )
@@ -80,20 +79,7 @@ class OutlookClient:
             return ""
         addr = from_field.get("emailAddress") or {}
         name = addr.get("name") or ""
-        email = addr.get("address") or ""
-        if name and email:
-            return f"{name} <{email}>"
-        return email or name
-
-    @staticmethod
-    def _classify_priority(sender: str, subject: str, snippet: str, is_read: bool) -> str:
-        text = f"{sender} {subject} {snippet}".lower()
-
-        high_terms = ("urgente", "reuniao", "reunião", "prazo", "importante")
-        medium_terms = ("atualizacao", "atualização", "follow-up", "retorno")
-
-        if not is_read and any(term in text for term in high_terms):
-            return "alta"
-        if any(term in text for term in medium_terms):
-            return "media"
-        return "baixa"
+        email_addr = addr.get("address") or ""
+        if name and email_addr:
+            return f"{name} <{email_addr}>"
+        return email_addr or name

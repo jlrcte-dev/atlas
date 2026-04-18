@@ -61,7 +61,6 @@ class GmailClient:
             label_ids = full_msg.get("labelIds", [])
 
             is_read = "UNREAD" not in label_ids
-            priority = self._classify_priority(sender, subject, snippet, is_read)
             timestamp = self._normalize_date(date_raw)
 
             results.append(
@@ -70,7 +69,7 @@ class GmailClient:
                     sender=sender,
                     subject=subject,
                     snippet=snippet,
-                    priority=priority,
+                    priority="baixa",
                     timestamp=timestamp,
                     is_read=is_read,
                 )
@@ -109,7 +108,6 @@ class GmailClient:
         label_ids = full_msg.get("labelIds", [])
 
         is_read = "UNREAD" not in label_ids
-        priority = self._classify_priority(sender, subject, snippet, is_read)
         timestamp = self._normalize_date(date_raw)
 
         return EmailMessage(
@@ -117,7 +115,7 @@ class GmailClient:
             sender=sender,
             subject=subject,
             snippet=snippet,
-            priority=priority,
+            priority="baixa",
             timestamp=timestamp,
             is_read=is_read,
         )
@@ -126,22 +124,6 @@ class GmailClient:
         raise NotImplementedError(
             "Envio de email ainda não implementado. Nesta fase, apenas leitura do Gmail."
         )
-
-    def _classify_priority(
-        self, sender: str, subject: str, snippet: str, is_read: bool
-    ) -> str:
-        text = f"{sender} {subject} {snippet}".lower()
-
-        high_terms = ["urgente", "reunião", "reuniao", "prazo", "importante"]
-        medium_terms = ["atualização", "atualizacao", "follow-up", "retorno"]
-
-        if not is_read and any(term in text for term in high_terms):
-            return "alta"
-
-        if any(term in text for term in medium_terms):
-            return "media"
-
-        return "baixa"
 
     def _normalize_date(self, date_raw: str) -> str:
         if not date_raw:
