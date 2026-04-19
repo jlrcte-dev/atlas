@@ -59,7 +59,7 @@ class RSSClient:
                         getattr(entry, "summary", "")
                         or getattr(entry, "description", "")
                     )
-                    category = self._infer_category(feed_title, title, summary)
+                    category = ""  # classification delegated to news_classifier
 
                     articles.append(
                         RSSArticle(
@@ -97,18 +97,6 @@ class RSSClient:
         text = re.sub(r"<[^>]+>", "", text)
         text = re.sub(r"\s+", " ", text).strip()
         return text
-
-    def _infer_category(self, source: str, title: str, summary: str) -> str:
-        text = f"{source} {title} {summary}".lower()
-
-        if any(term in text for term in ["mercado", "economia", "juros", "inflação", "inflacao", "ibovespa"]):
-            return "economia"
-        if any(term in text for term in ["ia", "inteligência artificial", "inteligencia artificial", "tecnologia", "software"]):
-            return "tecnologia"
-        if any(term in text for term in ["empresa", "negócio", "negocio", "startup", "aquisição", "aquisicao"]):
-            return "negocios"
-
-        return "geral"
 
     @staticmethod
     def to_dict(article: RSSArticle) -> dict:
