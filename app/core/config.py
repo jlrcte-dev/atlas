@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     email_provider: str = "gmail"
     timezone: str = "America/Sao_Paulo"
     log_level: str = "INFO"
+    news_scope_mode: str = "portfolio_macro_geo"
 
     model_config = SettingsConfigDict(
         env_file=".env",

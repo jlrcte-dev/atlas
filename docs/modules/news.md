@@ -1,6 +1,6 @@
 # Módulo News / RSS — Atlas AI Assistant
 
-> Documentação técnica oficial. Ciclo V1–V3 concluído. Última atualização: Abril 2026.
+> Documentação técnica oficial. Ciclo V1–V4 concluído. Última atualização: Abril 2026.
 
 ---
 
@@ -121,6 +121,37 @@ Cinco pontos `TODO: [V4]` inseridos nos locais de extensão natural:
 
 ---
 
+### V4 — Baseline Determinístico Avançado
+
+**O que foi implementado:**
+
+*Otimização do matching:* substituição de todas as iterações `any(t in text for t in frozenset)` por regex compilados com alternação única em `news_classifier.py`. 17 padrões compilados no carregamento do módulo. Custo por chamada reduzido de O(n×m) para O(m). Termos ordenados por comprimento decrescente para garantir que frases longas tenham precedência sobre substrings. `re.escape()` aplicado a todos os termos — incluindo os que contêm caracteres especiais como `"s.a."` e `"pré-mercado"`. Sem `\b` (word boundary) — matching substring, semanticamente equivalente ao original.
+
+*Normalização centralizada:* criação de `_normalize_text(text: str) -> str` em `news_classifier.py`. Eliminou a duplicação de `_normalize_title()` + `_PUNCT_RE` + `_SPACE_RE` em `news_service.py`. Reutilização explícita: o texto normalizado é computado uma única vez no scope gate e passado como parâmetro para `_build_item()`, evitando recomputação.
+
+*Scope gate híbrido (Modo 3):* criação de `app/integrations/tracked_scope.py`. Gate determinístico com três grupos compilados em regex: Grupo A (ativos monitorados), Grupo B (macro/política econômica), Grupo C (geopolítico/social com impacto material). Artigos descartados no gate **não chegam a `classify_news`**. Campo `_scope_gate_reason_internal` adicionado ao item para auditabilidade interna. Inserido como Layer 3 do pipeline, antes da classificação.
+
+*SimHash v1 (near-duplicate gate):* ativação de `app/integrations/simhash_utils.py`. Threshold de 10 bits (conservador). Fingerprint 64-bit via bag-of-words (hashlib.md5). Reutiliza `_normalized_text` já presente no item — zero recomputação. First-seen heuristic: item anterior é mantido quando near-dup é detectado. Layer 7 do pipeline, após dedup exato e antes do ranking. O(n²) — aceitável para volume atual.
+
+*Isolamento de campos internos:* items carregam campos `_`-prefixados durante o pipeline (`_normalized_text`, `_scope_gate_reason_internal`, `_simhash`, `_internal_score`, etc.). Todos removidos por `_strip_internal_fields()` antes da serialização na Layer 11. Contratos públicos e schemas Pydantic inalterados.
+
+**Problemas resolvidos:**
+
+- Custo de matching reduzido com padrões compilados em módulo-load.
+- Notícias de empresas irrelevantes eliminadas antes da classificação.
+- Near-duplicates com variação lexical (plural/singular, unidades diferentes) removidos do briefing.
+- Texto normalizado reutilizado entre layers — zero redundância de computação.
+- Campos de estado interno isolados com garantia de não-vazamento para APIs.
+
+**Limitações que permanecem após V4:**
+
+- SimHash com threshold=10 captura variações lexicais próximas (d≤10 bits), não paráfrases de vocabulário substancialmente diferente.
+- Threshold não calibrado com dados reais — valor inicial conservador por design.
+- `"vale"` (bare term) no Grupo A pode gerar falsos positivos ("vale transporte") em feeds não-financeiros.
+- First-seen heuristic no SimHash não garante o item de maior score quando há near-duplicates.
+
+---
+
 ## 3. Arquitetura do Módulo
 
 ### Visão de Componentes
@@ -128,10 +159,12 @@ Cinco pontos `TODO: [V4]` inseridos nos locais de extensão natural:
 ```
 app/integrations/
   rss_client.py          ← fetch + parse (sem classificação)
-  news_classifier.py     ← classificação individual por artigo
+  news_classifier.py     ← classificação individual + normalização centralizada
+  tracked_scope.py       ← scope gate: grupos A/B/C com regex compilado
+  simhash_utils.py       ← fingerprint 64-bit para near-duplicate detection
 
 app/modules/briefing/
-  news_service.py        ← pipeline: classifica, filtra, deduplica, ordena
+  news_service.py        ← pipeline: 11 layers — filtra, classifica, deduplica, ordena
   service.py             ← BriefingService (consome summarize_news())
 ```
 
@@ -151,36 +184,66 @@ Feeds RSS configurados (settings.rss_default_feeds)
         │
   NewsService.summarize_news()
         │
-        ├── Step 1: classificar + pontuar cada artigo
-        │   └── classify_news(title, summary, source)
-        │       ├── _detect_news_flags()          → NewsFlags
-        │       ├── _infer_news_category()        → str
-        │       ├── _score_news()                 → tuple[int, list[str]]
-        │       └── _derive_priority_from_score() → str
+        ├── Layer 1: Date gate
+        │   └── _is_today_sp() → descarta artigos não publicados hoje (BRT)
         │
-        ├── Step 2: separar ruído
+        ├── Layer 2: Quality gate
+        │   └── is_low_quality() → descarta listicles, clickbait, títulos curtos
+        │
+        ├── Layer 3: Scope gate   [V4]
+        │   └── _normalize_text() → normalized_text (computado uma única vez)
+        │       evaluate_scope(normalized_text)
+        │       ├── Grupo A: petrobras, vale3, ambev, ibovespa…
+        │       ├── Grupo B: selic, copom, banco central, câmbio…
+        │       └── Grupo C: guerra, sanções, conflito internacional…
+        │       • DROP → scope_dropped_count++ (não chega a classify_news)
+        │       • PASS → continua com normalized_text reutilizado
+        │
+        ├── Layer 4: Classification   [V4 — reutiliza normalized_text]
+        │   └── _build_item(article, normalized_text)
+        │       └── classify_news(title, summary, source)
+        │           ├── _detect_news_flags()          → NewsFlags (regex compilado)
+        │           ├── _infer_news_category()        → str (regex compilado)
+        │           ├── _score_news()                 → tuple[int, list[str]]
+        │           └── _derive_priority_from_score() → str
+        │       • item enriquecido com campos públicos + _-prefixados internos
+        │
+        ├── Layer 5: Noise split
         │   ├── noise_items → by_category["ruido"] (auditoria)
         │   └── valid_items → continua no pipeline
         │
-        ├── Step 3: deduplificar (antes do sort)
+        ├── Layer 6: Exact dedup
         │   └── _deduplicate_items()
-        │       • normalized title matching
-        │       • mantém maior score por grupo
-        │       • tie-break: primeiro visto
+        │       • _normalize_text(item["title"]) como chave
+        │       • mantém maior score por grupo; tie-break: primeiro visto
         │
-        ├── Step 4: ordenação única final
-        │   └── sorted(key=(score DESC, published DESC))
-        │       • _parse_published() com fallback para datetime.min
+        ├── Layer 7: Near-duplicate gate (SimHash)   [V4]
+        │   └── _filter_near_duplicates()
+        │       • simhash(item["_normalized_text"]) → fingerprint 64-bit
+        │       • hamming_distance(h, existing) ≤ 10 → near-dup → descartar
+        │       • PASS → _simhash adicionado ao item (campo interno)
         │
-        └── Step 5: montar resultado
-            ├── total, categories, by_category
-            ├── items (ordenados, sem ruído, sem duplicatas)
-            └── summary (string com contagem + HIGH count)
-                    │
-                    ▼
-          BriefingService._compose()
-          • consome news["summary"]
-          • consome news["items"][:3]  →  apenas item["title"]
+        ├── Layer 8: Ranking
+        │   └── _rank_items()
+        │       • final_score = score + quality_score*2
+        │       • sort: final_score DESC → published DESC
+        │
+        ├── Layer 9: Curation
+        │   └── _curate_top5() → max 3 high + medium, low descartado
+        │
+        ├── Layer 10: Diversity
+        │   └── _diversify() → cap same-category ≤ 2 quando alternativa existe
+        │
+        └── Layer 11: Output
+            └── _strip_internal_fields() → remove todos os _-prefixados
+                ├── by_category (curated + noise, sem campos internos)
+                ├── items (curated limpos)
+                └── summary (Telegram-aware one-liner)
+                        │
+                        ▼
+              BriefingService._compose()
+              • consome news["summary"]
+              • consome news["items"] → title, category, priority
 ```
 
 ---
@@ -398,40 +461,81 @@ Nenhum campo existente foi removido. Nenhum campo novo é obrigatório para o `B
 
 ### `app/integrations/news_classifier.py`
 
-**Responsabilidade única:** classificar um artigo individual. Não conhece listas, não faz I/O, não mantém estado. Entrada: `(title, summary, source)`. Saída: `NewsClassification`.
+**Responsabilidade única:** classificar um artigo individual + centralizar a normalização de texto. Não conhece listas, não faz I/O, não mantém estado.
 
 | Componente | Tipo | Função |
 |---|---|---|
 | `NewsFlags` | TypedDict | Estrutura dos 7 flags operacionais |
 | `NewsClassification` | TypedDict | Estrutura de saída: category, flags, score, priority, score_reasons |
-| `_MACRO` … `_SETORIAL` | `frozenset[str]` | Keywords por categoria (imutáveis) |
-| `_MARKET_IMPACT` … `_STRONG_SIGNAL` | `frozenset[str]` | Keywords por flag (imutáveis) |
-| `_NOISE` | `frozenset[str]` | Padrões de ruído (após ajuste pós-audit) |
-| `_VAGUE_TITLE` | `frozenset[str]` | Padrões de título vago (penalidade −2) |
+| `_MACRO` … `_SETORIAL` | `frozenset[str]` | Keywords por categoria (vocabulário de referência) |
+| `_MACRO_RE` … `_SETORIAL_RE` | `re.Pattern` | Regex compilado por categoria (single-pass matching) |
+| `_MARKET_IMPACT_RE` … `_NOISE_RE` | `re.Pattern` | Regex compilado por flag operacional |
 | `_ECONOMIC_NUMBER_RE` | `re.Pattern` | Regex: número adjacente a marcador econômico |
-| `_CATEGORY_PRIORITY` | `list[tuple]` | Ordem de prioridade entre categorias |
+| `_CATEGORY_PATTERNS` | `list[tuple]` | Pares (categoria, padrão compilado) — ordem preservada |
 | `SCORE_WEIGHTS` | `dict[str, int]` | Pesos por flag (fonte única de calibração) |
 | `CATEGORY_SCORE` | `dict[str, int]` | Bônus/penalidade por categoria |
 | `SCORE_THRESHOLD_HIGH/MEDIUM` | `int` | Limiares de prioridade |
+| `_normalize_text()` | função pública | Normalização compartilhada: lowercase + strip punctuation + collapse spaces |
+| `_build_pattern()` | função privada | Compila frozenset em regex de alternação ordenada por comprimento |
 | `classify_news()` | função pública | API com try/except e fallback explícito |
-| `_infer_news_category()` | função privada | Categoria por prioridade + short-circuit de ruído |
-| `_detect_news_flags()` | função privada | 7 flags por keyword matching |
+| `compute_quality_score()` | função pública | Modificador de ranking 0–2 (não afeta prioridade) |
+| `is_low_quality()` | função pública | Gate pré-score: listicle, clickbait, reciclado |
+| `_infer_news_category()` | função privada | Categoria por regex compilado + short-circuit de ruído |
+| `_detect_news_flags()` | função privada | 7 flags via regex compilado (single-pass each) |
 | `_score_news()` | função privada | Score composto + score_reasons auditável |
 | `_derive_priority_from_score()` | função privada | `high / medium / low` via threshold |
 
 ---
 
+### `app/integrations/tracked_scope.py`
+
+**Responsabilidade única:** determinar se um artigo está no escopo do pipeline (Modo 3: portfolio\_macro\_geo). Não classifica, não pontua, não faz I/O.
+
+| Componente | Tipo | Função |
+|---|---|---|
+| `_GROUP_A_TERMS` | `list[str]` | Ativos monitorados: Petrobras, Vale, Ambev, Itaúsa, Ibovespa |
+| `_GROUP_B_TERMS` | `list[str]` | Macro/política econômica: Selic, Copom, câmbio, dólar… |
+| `_GROUP_C_TERMS` | `list[str]` | Geopolítico/social com impacto material: guerra, sanções… |
+| `_GROUP_A_RE` / `_GROUP_B_RE` / `_GROUP_C_RE` | `re.Pattern` | Padrões compilados, termos ordenados por comprimento decrescente |
+| `_build_scope_pattern()` | função privada | Compila lista de termos em regex de alternação |
+| `evaluate_scope()` | função pública | `(bool, str \| None)` — grupo ativado ou `(False, None)` |
+
+**Contrato de normalização:** o caller é responsável por normalizar o texto via `_normalize_text` antes de chamar `evaluate_scope`. O módulo não re-normaliza.
+
+---
+
+### `app/integrations/simhash_utils.py`
+
+**Responsabilidade única:** utilitários de fingerprint para near-duplicate detection. Sem estado, sem I/O, sem dependências externas.
+
+| Componente | Tipo | Função |
+|---|---|---|
+| `simhash(text, bits=64)` | função pública | Fingerprint inteiro de `bits` bits via bag-of-words + MD5 |
+| `hamming_distance(h1, h2)` | função pública | Número de bits diferentes entre dois fingerprints |
+
+**Algoritmo:** para cada token (whitespace split + lowercase), computa MD5 como inteiro; acumula vetor de votos (+1/−1) por bit; colapsa: bit i = 1 se v[i] > 0. Propriedade: distância de Hamming ≈ distância de cosseno entre bag-of-words.
+
+---
+
 ### `app/modules/briefing/news_service.py`
 
-**Responsabilidade:** orquestrar o pipeline de artigos. Não conhece regras de classificação — delega completamente ao classifier.
+**Responsabilidade:** orquestrar o pipeline de 11 layers. Não conhece regras de classificação ou scope — delega completamente aos módulos de integração.
 
 | Componente | Tipo | Função |
 |---|---|---|
 | `_parse_published()` | função módulo | Parser ISO/RFC2822 com fallback `datetime.min` |
-| `_normalize_title()` | função módulo | Normalização para deduplicação |
-| `_deduplicate_items()` | função módulo | Deduplicação por título normalizado |
-| `NewsService.summarize_news()` | método | Pipeline completo em 5 steps explícitos |
-| `NewsService.normalize_articles()` | método | Artigos classificados sem filtro/ordenação |
+| `_is_today_sp()` | função módulo | Date gate: artigo publicado hoje em BRT? |
+| `_strip_internal_fields()` | função módulo | Remove todos os campos `_`-prefixados antes da serialização |
+| `_build_item()` | função módulo | Classifica artigo e constrói dict enriquecido (públicos + internos) |
+| `_curate_top5()` | função módulo | Seleciona top-5: max 3 high + medium; low descartado |
+| `_deduplicate_items()` | função módulo | Dedup exato por título normalizado; mantém maior score |
+| `_filter_near_duplicates()` | função módulo | SimHash gate: first-seen heuristic com threshold de Hamming |
+| `_SIMHASH_THRESHOLD` | constante | 10 bits — valor conservador inicial, calibrável |
+| `_rank_items()` | função módulo | Sort por final\_score = score + quality\_score\*2, depois published DESC |
+| `_diversify()` | função módulo | Cap same-category ≤ 2 quando alternativa de igual ou maior prioridade existe |
+| `_infer_focus()` | função módulo | Top-2 labels de categoria para o summary do Telegram |
+| `NewsService.summarize_news()` | método | Pipeline completo em 11 layers explícitos |
+| `NewsService.normalize_articles()` | método | Artigos classificados sem gate, sem filtro, sem ordenação |
 | `NewsService.fetch_rss()` | método | Artigos brutos sem classificação (raw) |
 | `NewsService.get_briefing()` | método | Alias de compatibilidade para `summarize_news()` |
 
@@ -468,21 +572,40 @@ O modelo segue separação limpa entre o que classificar (classifier), como proc
 - Não há distinção entre fontes: um feed de baixa qualidade e um feed do Banco Central têm o mesmo peso.
 - Termos como `"crescimento"` em `_ECONOMIC_IMPACT` e `"governo"` em `_POLITICA` são suficientemente genéricos para aparecer em contextos não econômicos.
 
-### Deduplicação
+### Deduplicação Exata
 
-- Detecta apenas títulos **idênticos após normalização**. Artigos sobre o mesmo evento com títulos diferentes ("Fed mantém juros" e "Banco central americano não altera taxa") não são identificados como duplicatas.
+- Detecta apenas títulos **idênticos após normalização**. Artigos sobre o mesmo evento com títulos diferentes ("Fed mantém juros" e "Banco central americano não altera taxa") não são identificados como duplicatas pelo dedup exato.
 - Títulos muito curtos (2–3 palavras após normalização) aumentam o risco de falsos positivos.
+
+### SimHash (Near-Duplicate Gate)
+
+- O SimHash é bag-of-words: captura variações lexicais próximas (mesmo vocabulário com pequenas diferenças) mas **não** captura paráfrases semânticas com vocabulário substancialmente diferente.
+- Threshold de 10 bits conservador por design: paráfrases como "Selic sobe 0,5 ponto, diz BC" (d=23 em relação a "Banco Central eleva Selic em 0,5 ponto") não são removidas. Threshold precisará de calibração com dados reais.
+- First-seen heuristic: quando near-duplicates são detectados, o item mais antigo na ordem de chegada é mantido, independente do score. O ranking posterior reordena por qualidade, mitigando o impacto.
+- Complexidade O(n²) na comparação de hashes — aceitável para volume atual (< 200 itens/dia após gates upstream). Monitorar se volume crescer acima de ~1.000 itens/sessão.
+
+### Scope Gate
+
+- `"vale"` (bare term) no Grupo A pode gerar falsos positivos em feeds não-financeiros ("vale transporte", "vale alimentação"). Aceito porque os feeds do Atlas são fontes financeiras. Mitigation futura: usar `"vale3"` como único match não-ambíguo ou adicionar negative lookahead.
+- `"guerra"` e `"greve"` são termos amplos: "guerra de preços" ou "greve de professores" (sem impacto de mercado) passariam no gate. Trade-off intencional: falsos negativos (drops indevidos de notícias relevantes) são mais custosos que falsos positivos no briefing de mercado.
 
 ### Score
 
 - Os pesos foram definidos por julgamento, não por calibração com dados reais. A distribuição de `high/medium/low` nos primeiros dias pode requerer ajuste.
 - Não há decay temporal: um artigo de ontem com score 9 e um de hoje com score 9 são equivalentes — a data só desempata, não penaliza a antiguidade.
 - Score máximo teórico atingível (13) não é esperado em artigos reais.
-- `"crescimento"` como flag de `has_economic_impact` é amplo: aparece em contextos de tech, startups e empresas mesmo quando não há impacto macro real.
 
 ### Labels de Prioridade
 
 - O módulo News usa `"high/medium/low"` (EN) enquanto o módulo Email usa `"alta/media/baixa"` (PT-BR). Qualquer código que compare prioridades entre os dois módulos precisará de mapeamento explícito.
+
+### Fora do Escopo desta Fase
+
+- IA / LLM — nenhuma integração implementada.
+- Módulo de email — não faz parte desta fase.
+- Thread dedup — não implementado.
+- Rule engine global — não implementado.
+- LSH / MinHash / banding — não implementados (SimHash v1 é suficiente para volume atual).
 
 ---
 
@@ -572,14 +695,25 @@ Os cinco pontos de extensão estão marcados com `TODO: [V4]` no código nos loc
 
 | Dimensão | Avaliação |
 |---|---|
-| **Maturidade** | Médio-alto |
+| **Ciclo** | V4 — Baseline Determinístico Avançado |
+| **Maturidade** | Médio-alto — funcional, não calibrado |
 | **Pronto para uso real** | **Sim** |
 | **Nível de risco operacional** | Baixo |
+| **Calibração de produção** | Pendente — requer uso real |
 
 **Justificativa:**
 
-O sistema é funcionalmente correto, determinístico e resiliente. Todos os casos de erro têm fallback explícito. O contrato com o `BriefingService` é estável. O audit pré-produção foi executado (Abril 2026) e o único ajuste blocker (`"desconto"` em `_NOISE`) foi aplicado.
+O sistema é funcionalmente correto, determinístico e resiliente. Pipeline de 11 layers com responsabilidades isoladas. Contratos públicos e schemas Pydantic inalterados ao longo de todo o ciclo V1–V4. O `BriefingService` continua funcionando sem qualquer modificação. Audits técnicos executados em cada fase — nenhuma regressão detectada.
 
-A maturidade é "médio-alto" e não "alto" porque os pesos e thresholds foram definidos por julgamento, não por observação de dados reais. A calibração fina pertence à próxima iteração após coleta de comportamento em produção.
+A maturidade é "médio-alto" e não "alto" por três razões deliberadas: (1) os pesos e thresholds do classificador foram definidos por julgamento, não por observação de dados reais; (2) o threshold do SimHash (10 bits) é conservador e não calibrado; (3) o scope gate pode precisar de ajuste fino nos termos do Grupo A ("vale") após validação com feeds reais.
 
-O risco operacional é baixo: o pior cenário de falha (feed RSS indisponível, artigo com encoding incomum) está coberto pelos fallbacks existentes. Não há risco de crash do briefing por falha no módulo de notícias.
+O risco operacional é baixo: todos os casos de erro têm fallback explícito, o pior cenário de falha (feed RSS indisponível, artigo com encoding incomum) está coberto, e o SimHash gate opera de forma stateless — falha em um fingerprint não afeta os demais.
+
+**Esta fase está consolidada.** Ajustes futuros dependem de uso real e coleta de evidências. O módulo de email não faz parte desta fase.
+
+**Próximos passos recomendados:**
+
+1. Uso real controlado — observar `scope_dropped`, `simhash_dropped` e `curated` nos logs de `summarize_news`.
+2. Calibração do threshold SimHash — se near-duplicates semânticos chegam ao briefing, elevar threshold de 10 para ~14–18 e medir impacto em falsos positivos.
+3. Refinamento do Grupo A — avaliar se "vale" (bare term) gera falsos positivos observáveis; substituir por "vale3" + "vale s.a." se necessário.
+4. Calibração de scores — ajustar pesos com base na distribuição real de `high/medium/low` observada.

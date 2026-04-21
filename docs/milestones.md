@@ -77,6 +77,20 @@ Modelo de score determinístico com pesos por flag e bônus por categoria. Prior
 
 Refinamento de `has_numbers`: de qualquer dígito para número adjacente a marcador econômico (`%`, `R$`, `bi`, `bps`, `bilhões`…). Parsing de datas robusto com cascata ISO 8601 → RFC 2822 → `datetime.min`. Deduplicação limpa: sem penalidade de score no item perdedor. Summary enriquecido com contagem de itens `high`. Remoção de `"desconto"` do set `_NOISE` (ajuste pós-audit: termo genérico que filtrava artigos legítimos de finanças). Inserção de 5 pontos `TODO: [V4]` como marcadores de extensão futura.
 
+**V4 — Baseline Determinístico Avançado (Filtros + SimHash)**
+
+Fase de consolidação do motor determinístico antes de qualquer integração com IA.
+
+*Otimização do matching:* substituição de todas as iterações `any(t in text for t in frozenset)` por regex compilados com alternação única (`re.compile`) em `news_classifier.py`. 17 padrões compilados no carregamento do módulo, custo por chamada reduzido de O(n×m) para O(m). Termos ordenados por comprimento decrescente para precedência de frases sobre substrings.
+
+*Normalização centralizada:* criação de `_normalize_text()` em `news_classifier.py` como função utilitária compartilhada. Eliminação da duplicação com `_normalize_title()` em `news_service.py`. Reutilização explícita do texto normalizado entre camadas do pipeline (scope gate → classificação) para evitar recomputação.
+
+*Scope gate híbrido (Modo 3 — portfolio\_macro\_geo):* criação de `app/integrations/tracked_scope.py`. Gate determinístico com três grupos: Grupo A (ativos monitorados: Petrobras, Vale, Ambev, Itaúsa, Ibovespa), Grupo B (macro/política econômica: Selic, Copom, Banco Central, câmbio, dólar, minério de ferro…), Grupo C (geopolítico/social com impacto material: guerra, sanções, conflito internacional, bloqueio logístico, choque de oferta…). Itens descartados no gate não chegam a `classify_news` — elimina custo de classificação sobre notícias fora do escopo. Função pública: `evaluate_scope(normalized_text) -> (bool, str | None)`.
+
+*Near-duplicate gate por SimHash v1:* ativação do módulo `app/integrations/simhash_utils.py` (criado na fase anterior, não integrado até agora). Threshold de 10 bits (conservador). Fingerprint 64-bit via bag-of-words (hashlib.md5). Reutilização de `_normalized_text` já presente no item. Estratégia first-seen (heurística). O(n²) — aceitável para volume atual. Não substitui o dedup exato; opera após ele como segunda barreira.
+
+*Isolamento de campos internos:* itens carregam campos `_`-prefixados durante o pipeline (`_normalized_text`, `_scope_gate_reason_internal`, `_simhash`, `_internal_score`, etc.). Todos removidos pela função `_strip_internal_fields()` antes da serialização — contratos públicos e schemas Pydantic inalterados.
+
 **Capacidades atuais:**
 
 - Classificação de artigos em 8 categorias funcionais
