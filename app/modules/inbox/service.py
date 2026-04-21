@@ -8,7 +8,11 @@ from __future__ import annotations
 from app.core.config import settings
 from app.core.logging import get_logger, log_action
 from app.integrations.base_email_client import BaseEmailClient
-from app.integrations.email_classifier import EmailClassification, classify_email
+from app.integrations.email_classifier import (
+    EmailClassification,
+    build_short_reason,
+    classify_email,
+)
 from app.integrations.email_models import EmailMessage, email_to_dict
 from app.integrations.gmail_client import GmailClient
 
@@ -25,6 +29,59 @@ _FALLBACK_CLASSIFICATION = EmailClassification(
     score=0,
     score_reasons=[],
 )
+
+
+_PRIORITY_ORDER: dict[str, int] = {"alta": 0, "media": 1, "baixa": 2}
+
+
+def _build_top5(
+    emails: list[EmailMessage],
+    classifications: dict[str, EmailClassification],
+) -> list[dict]:
+    """Return up to 5 prioritized emails for Telegram executive view.
+
+    Hard filters applied before ranking:
+    - Exclude newsletter/noise (low-value content, spam-equivalent)
+    - Exclude read emails with no operational signal (no response/deadline/follow-up/opportunity)
+
+    Ranking: priority (alta → media → baixa), then score descending, then original list
+    order (stable sort preserves client ordering — Gmail returns newest first).
+    """
+    def _is_eligible(email: EmailMessage) -> bool:
+        clf = classifications[email.id]
+        if clf.category in ("newsletter", "noise"):
+            return False
+        has_action = (
+            clf.requires_response
+            or clf.has_deadline
+            or clf.is_follow_up
+            or clf.is_opportunity
+        )
+        if email.is_read and not has_action:
+            return False
+        return True
+
+    eligible = [e for e in emails if _is_eligible(e)]
+    ranked = sorted(
+        eligible,
+        key=lambda e: (
+            _PRIORITY_ORDER.get(classifications[e.id].priority, 2),
+            -classifications[e.id].score,
+        ),
+    )
+
+    result: list[dict] = []
+    for email in ranked[:5]:
+        clf = classifications[email.id]
+        result.append({
+            "id": email.id,
+            "priority": clf.priority,
+            "subject": email.subject,
+            "sender": email.sender,
+            "short_reason": build_short_reason(clf.audit_tags),
+            "audit_tags": clf.audit_tags,
+        })
+    return result
 
 
 def _build_default_client() -> BaseEmailClient:
@@ -84,8 +141,10 @@ class InboxService:
                 "medium_priority": 0,
                 "low_priority": 0,
                 "unread": 0,
+                "newsletter_count": 0,
                 "items": [],
                 "action_items": [],
+                "top5": [],
                 "summary": "Inbox temporariamente indisponivel.",
             }
 
@@ -95,6 +154,9 @@ class InboxService:
         medium = [e for e in emails if classifications[e.id].priority == "media"]
         low = [e for e in emails if classifications[e.id].priority == "baixa"]
         unread = [e for e in emails if not e.is_read]
+        newsletter_count = sum(
+            1 for e in emails if classifications[e.id].category == "newsletter"
+        )
 
         # action_items: emails with any operational flag, ordered by score descending
         action_emails = sorted(
@@ -118,8 +180,10 @@ class InboxService:
             "medium_priority": len(medium),
             "low_priority": len(low),
             "unread": len(unread),
+            "newsletter_count": newsletter_count,
             "items": [email_to_dict(e) for e in emails],
             "action_items": [email_to_dict(e) for e in action_emails],
+            "top5": _build_top5(emails, classifications),
             "summary": summary,
         }
         log_action(

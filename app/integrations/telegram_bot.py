@@ -188,9 +188,44 @@ class TelegramBot:
                 )
 
         b1.append(f"\n<b>📥 Inbox</b>")
-        b1.append(esc(inbox.get("summary", "")))
-        for item in inbox.get("action_items", [])[:5]:
-            b1.append(f"• {esc(item.get('sender', ''))} — {esc(item.get('subject', ''))}")
+        total_emails = inbox.get("total", 0)
+        unread_count = inbox.get("unread", 0)
+        nl_count = inbox.get("newsletter_count", 0)
+        high_count = inbox.get("high_priority", 0)
+        medium_count = inbox.get("medium_priority", 0)
+        low_count = inbox.get("low_priority", 0)
+        b1.append(
+            f"📊 {esc(total_emails)} analisados · "
+            f"{esc(unread_count)} não lidos · "
+            f"{esc(nl_count)} newsletters"
+        )
+        b1.append(
+            f"🔴 {esc(high_count)} alta · "
+            f"🟡 {esc(medium_count)} média · "
+            f"⚪ {esc(low_count)} baixa"
+        )
+        top5 = inbox.get("top5", [])
+        if top5:
+            b1.append("\n<b>📌 Top 5 prioritários</b>")
+            _PRIORITY_ICON = {"alta": "🔴", "media": "🟡", "baixa": "⚪"}
+            for item in top5:
+                icon = _PRIORITY_ICON.get(item.get("priority", ""), "⚪")
+                raw_sender = item.get("sender", "")
+                # Show display name when available ("Name <email>"), else local-part
+                if "<" in raw_sender:
+                    display_sender = raw_sender.split("<")[0].strip() or raw_sender.split("<")[1].rstrip(">").strip()
+                elif "@" in raw_sender:
+                    display_sender = raw_sender.split("@")[0]
+                else:
+                    display_sender = raw_sender
+                raw_subj = item.get("subject", "")
+                short_subj = (raw_subj[:57] + "…") if len(raw_subj) > 60 else raw_subj
+                b1.append(
+                    f"{icon} <b>{esc(short_subj)}</b>\n"
+                    f"   De: {esc(display_sender)} · {esc(item.get('short_reason', ''))}"
+                )
+        else:
+            b1.append(esc(inbox.get("summary", "")))
 
         block1 = "\n".join(b1)
 

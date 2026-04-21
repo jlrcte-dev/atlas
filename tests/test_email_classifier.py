@@ -570,3 +570,407 @@ def test_action_items_ordered_by_score():
     ids = [item["id"] for item in result["action_items"]]
     # high must come before the others
     assert ids[0] == "high"
+
+
+# ── v3: Audit tags ────────────────────────────────────────────────────────────
+
+
+def test_audit_tags_newsletter_penalized():
+    """Newsletter and noise must produce exactly [NEWSLETTER_PENALIZED]."""
+    nl = _make(snippet="unsubscribe from this list")
+    clf = classify_email(nl)
+    assert clf.audit_tags == ["NEWSLETTER_PENALIZED"]
+
+
+def test_audit_tags_noise_penalized():
+    noise = _make(subject="Oferta especial — desconto imperdível hoje")
+    clf = classify_email(noise)
+    assert clf.audit_tags == ["NEWSLETTER_PENALIZED"]
+
+
+def test_audit_tags_has_deadline():
+    email = _make(subject="Relatório — prazo amanhã")
+    clf = classify_email(email)
+    assert "HAS_DEADLINE" in clf.audit_tags
+
+
+def test_audit_tags_action_required():
+    email = _make(subject="Aguardo sua resposta sobre o contrato")
+    clf = classify_email(email)
+    assert "ACTION_REQUIRED" in clf.audit_tags
+
+
+def test_audit_tags_financial_topic():
+    email = _make(subject="Pagamento de fatura — boleto em anexo")
+    clf = classify_email(email)
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_audit_tags_follow_up_pending():
+    email = _make(subject="Acompanhamento sobre nossa conversa de ontem")
+    clf = classify_email(email)
+    assert "FOLLOW_UP_PENDING" in clf.audit_tags
+
+
+def test_audit_tags_important_sender():
+    email = _make(
+        subject="Atualização do projeto",
+        sender="Ana Lima <ana@empresa.com>",
+    )
+    clf = classify_email(email)
+    assert "IMPORTANT_SENDER" in clf.audit_tags
+
+
+def test_audit_tags_bulk_sender_penalized():
+    email = _make(
+        subject="Atualização do sistema",
+        sender="noreply@plataforma.com",
+    )
+    clf = classify_email(email)
+    assert "BULK_SENDER_PENALIZED" in clf.audit_tags
+
+
+def test_audit_tags_empty_for_plain_update():
+    """Plain update with no signals and anonymous sender must have no audit tags."""
+    email = _make(subject="Retorno sobre reunião de ontem")
+    clf = classify_email(email)
+    assert clf.audit_tags == []
+
+
+# ── v3: build_short_reason ────────────────────────────────────────────────────
+
+
+def test_build_short_reason_deadline_takes_precedence():
+    """HAS_DEADLINE must win over other tags in short_reason."""
+    from app.integrations.email_classifier import build_short_reason
+
+    tags = ["HAS_DEADLINE", "ACTION_REQUIRED", "FOLLOW_UP_PENDING"]
+    assert build_short_reason(tags) == "Prazo ou data identificada"
+
+
+def test_build_short_reason_action_required():
+    from app.integrations.email_classifier import build_short_reason
+
+    assert build_short_reason(["ACTION_REQUIRED"]) == "Requer resposta/ação"
+
+
+def test_build_short_reason_financial():
+    from app.integrations.email_classifier import build_short_reason
+
+    assert build_short_reason(["FINANCIAL_TOPIC"]) == "Assunto financeiro/pagamento"
+
+
+def test_build_short_reason_fallback():
+    from app.integrations.email_classifier import build_short_reason
+
+    assert build_short_reason([]) == "Email relevante"
+    assert build_short_reason(["NEWSLETTER_PENALIZED"]) == "Email relevante"
+
+
+# ── v3: Financial signal detection ───────────────────────────────────────────
+
+
+def test_financial_signal_via_subject():
+    email = _make(subject="Boleto de pagamento — vence hoje")
+    clf = classify_email(email)
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_financial_signal_via_snippet():
+    email = _make(snippet="Segue em anexo a nota fiscal para conferência.")
+    clf = classify_email(email)
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_financial_signal_does_not_change_score():
+    """Financial detection is audit-only — must not alter the score."""
+    email_financial = _make(subject="Pagamento da fatura mensal")
+    email_plain = _make(subject="Atualização do sistema")
+    clf_f = classify_email(email_financial)
+    clf_p = classify_email(email_plain)
+    assert clf_f.score == clf_p.score
+
+
+def test_financial_newsletter_stays_baixa():
+    """Financial signals inside a newsletter must not escape the short-circuit."""
+    email = _make(
+        subject="Newsletter — fatura e pagamento de assinaturas",
+        snippet="unsubscribe",
+    )
+    clf = classify_email(email)
+    assert clf.category == "newsletter"
+    assert clf.priority == "baixa"
+    assert clf.audit_tags == ["NEWSLETTER_PENALIZED"]
+
+
+# ── v3: Service top5 ──────────────────────────────────────────────────────────
+
+
+def test_top5_excludes_newsletter():
+    nl = _make(id="nl", snippet="Para descadastrar clique em unsubscribe.", is_read=False)
+    action = _make(id="act", subject="Prazo hoje — aguardo confirmação?")
+    svc = InboxService(client=_make_client([nl, action]))
+    result = svc.summarize_emails()
+    top5_ids = [item["id"] for item in result["top5"]]
+    assert "nl" not in top5_ids
+    assert "act" in top5_ids
+
+
+def test_top5_excludes_noise():
+    noise = _make(id="nz", subject="Oferta especial — cupom imperdível!", is_read=False)
+    action = _make(id="act", subject="Aguardo sua resposta urgente.")
+    svc = InboxService(client=_make_client([noise, action]))
+    result = svc.summarize_emails()
+    top5_ids = [item["id"] for item in result["top5"]]
+    assert "nz" not in top5_ids
+    assert "act" in top5_ids
+
+
+def test_top5_excludes_read_without_action():
+    """Read email with no operational flags must be excluded from top5."""
+    read_plain = _make(id="r", subject="Atualização do sistema", is_read=True)
+    unread_plain = _make(id="u", subject="Relatório mensal", is_read=False)
+    svc = InboxService(client=_make_client([read_plain, unread_plain]))
+    result = svc.summarize_emails()
+    top5_ids = [item["id"] for item in result["top5"]]
+    assert "r" not in top5_ids
+    assert "u" in top5_ids
+
+
+def test_top5_includes_read_with_deadline():
+    """Read email WITH deadline flag must NOT be excluded from top5."""
+    read_with_deadline = _make(
+        id="rwdl",
+        subject="Prazo de entrega — vencimento amanhã",
+        is_read=True,
+    )
+    svc = InboxService(client=_make_client([read_with_deadline]))
+    result = svc.summarize_emails()
+    top5_ids = [item["id"] for item in result["top5"]]
+    assert "rwdl" in top5_ids
+
+
+def test_top5_ordering_alta_before_media():
+    """Alta-priority email must appear before media-priority in top5."""
+    media = _make(id="med", subject="Acompanhamento sobre nossa conversa de ontem")
+    alta = _make(id="alta", subject="Prazo hoje — aguardo confirmação urgente?")
+    svc = InboxService(client=_make_client([media, alta]))
+    result = svc.summarize_emails()
+    top5 = result["top5"]
+    assert top5[0]["id"] == "alta"
+    assert top5[0]["priority"] == "alta"
+
+
+def test_top5_has_required_fields():
+    """Each top5 item must expose priority, subject, sender, short_reason, audit_tags."""
+    email = _make(subject="Prazo hoje — aguardo confirmação?")
+    svc = InboxService(client=_make_client([email]))
+    result = svc.summarize_emails()
+    assert len(result["top5"]) == 1
+    item = result["top5"][0]
+    for field_name in ("id", "priority", "subject", "sender", "short_reason", "audit_tags"):
+        assert field_name in item, f"top5 item missing field: {field_name}"
+    assert isinstance(item["short_reason"], str)
+    assert len(item["short_reason"]) > 0
+
+
+def test_top5_short_reason_maps_correctly():
+    """Email with deadline must produce 'Prazo ou data identificada' as short_reason."""
+    email = _make(subject="Contrato — prazo amanhã para assinatura")
+    svc = InboxService(client=_make_client([email]))
+    result = svc.summarize_emails()
+    assert result["top5"][0]["short_reason"] == "Prazo ou data identificada"
+
+
+def test_result_has_newsletter_count():
+    """summarize_emails() must include newsletter_count in result."""
+    nl = _make(id="nl", snippet="unsubscribe from this list")
+    act = _make(id="act", subject="Por favor revise este documento urgente")
+    svc = InboxService(client=_make_client([nl, act]))
+    result = svc.summarize_emails()
+    assert "newsletter_count" in result
+    assert result["newsletter_count"] == 1
+
+
+def test_result_has_top5():
+    """summarize_emails() must include top5 in result."""
+    email = _make(subject="Atualização do sistema", is_read=False)
+    svc = InboxService(client=_make_client([email]))
+    result = svc.summarize_emails()
+    assert "top5" in result
+    assert isinstance(result["top5"], list)
+
+
+# ── v4: PIX signals ────────────────────────────────────────────────────────────
+
+
+def test_pix_enviado_detected():
+    email = _make(subject="Pix enviado com sucesso — R$ 150,00")
+    clf = classify_email(email)
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_pix_recebido_detected():
+    email = _make(snippet="Você recebeu um pix recebido de João Lima.")
+    clf = classify_email(email)
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_comprovante_pix_detected():
+    email = _make(subject="Comprovante pix — transferência realizada")
+    clf = classify_email(email)
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_transferencia_pix_detected():
+    email = _make(subject="Transferência pix agendada para amanhã")
+    clf = classify_email(email)
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_pagamento_pix_detected():
+    email = _make(snippet="Segue o pagamento pix conforme solicitado.")
+    clf = classify_email(email)
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_pix_in_newsletter_stays_baixa():
+    """PIX signal inside a newsletter must not escape the newsletter short-circuit."""
+    email = _make(
+        subject="Newsletter — comprovante pix e pagamento pix disponíveis",
+        snippet="Para descadastrar clique em unsubscribe.",
+    )
+    clf = classify_email(email)
+    assert clf.category == "newsletter"
+    assert clf.priority == "baixa"
+    assert clf.audit_tags == ["NEWSLETTER_PENALIZED"]
+    assert "FINANCIAL_TOPIC" not in clf.audit_tags
+
+
+def test_pix_does_not_change_score():
+    """PIX detection is audit-only — must not alter the score."""
+    with_pix = _make(subject="Pix enviado — R$ 200,00")
+    without_pix = _make(subject="Atualização de sistema")
+    clf_pix = classify_email(with_pix)
+    clf_plain = classify_email(without_pix)
+    assert clf_pix.score == clf_plain.score
+
+
+# ── v4: Learned senders ───────────────────────────────────────────────────────
+
+
+def test_learned_sender_adds_tag():
+    """Sender in learning list must receive IMPORTANT_SENDER_LEARNED tag."""
+    with patch(
+        "app.integrations.email_classifier._load_learned_senders",
+        return_value=frozenset({"vip@parceiro.com"}),
+    ):
+        email = _make(subject="Proposta de projeto", sender="vip@parceiro.com")
+        clf = classify_email(email)
+    assert "IMPORTANT_SENDER_LEARNED" in clf.audit_tags
+
+
+def test_learned_sender_with_display_name():
+    """Learned sender extracted from 'Name <addr>' format must match."""
+    with patch(
+        "app.integrations.email_classifier._load_learned_senders",
+        return_value=frozenset({"vip@parceiro.com"}),
+    ):
+        email = _make(subject="Reunião amanhã", sender="Ana VIP <vip@parceiro.com>")
+        clf = classify_email(email)
+    assert "IMPORTANT_SENDER_LEARNED" in clf.audit_tags
+
+
+def test_learned_sender_boosts_score():
+    """Learned sender must increase score compared to same email without learned flag."""
+    base_subject = "Atualização sobre o projeto"
+    with patch(
+        "app.integrations.email_classifier._load_learned_senders",
+        return_value=frozenset({"vip@parceiro.com"}),
+    ):
+        clf_learned = classify_email(_make(subject=base_subject, sender="vip@parceiro.com"))
+    clf_normal = classify_email(_make(subject=base_subject, sender="vip@parceiro.com"))
+    assert clf_learned.score > clf_normal.score
+    assert "learned_sender" in clf_learned.score_reasons
+
+
+def test_learned_sender_raises_priority_to_media():
+    """Learned anonymous sender alone must yield at least media priority."""
+    with patch(
+        "app.integrations.email_classifier._load_learned_senders",
+        return_value=frozenset({"vip@parceiro.com"}),
+    ):
+        email = _make(subject="Olá, tudo certo?", sender="vip@parceiro.com")
+        clf = classify_email(email)
+    assert clf.priority in ("media", "alta")
+
+
+def test_learned_sender_not_in_list_no_tag():
+    """Sender NOT in learning list must not receive IMPORTANT_SENDER_LEARNED."""
+    with patch(
+        "app.integrations.email_classifier._load_learned_senders",
+        return_value=frozenset({"outro@empresa.com"}),
+    ):
+        email = _make(subject="Atualização", sender="nao@listado.com")
+        clf = classify_email(email)
+    assert "IMPORTANT_SENDER_LEARNED" not in clf.audit_tags
+
+
+def test_learned_sender_exact_match_no_false_positive():
+    """Partial address overlap must NOT match ('naojoao@' vs 'joao@')."""
+    with patch(
+        "app.integrations.email_classifier._load_learned_senders",
+        return_value=frozenset({"joao@empresa.com"}),
+    ):
+        email = _make(subject="Contato", sender="naojoao@empresa.com")
+        clf = classify_email(email)
+    assert "IMPORTANT_SENDER_LEARNED" not in clf.audit_tags
+
+
+def test_learned_sender_newsletter_stays_baixa():
+    """Learned sender that sends a newsletter must still be baixa (short-circuit absolute)."""
+    with patch(
+        "app.integrations.email_classifier._load_learned_senders",
+        return_value=frozenset({"vip@parceiro.com"}),
+    ):
+        email = _make(
+            subject="Newsletter semanal",
+            snippet="Para descadastrar clique em unsubscribe.",
+            sender="vip@parceiro.com",
+        )
+        clf = classify_email(email)
+    assert clf.category == "newsletter"
+    assert clf.priority == "baixa"
+    assert "IMPORTANT_SENDER_LEARNED" not in clf.audit_tags
+
+
+def test_learned_sender_fallback_when_empty():
+    """When learning list is empty, no IMPORTANT_SENDER_LEARNED tag must be emitted."""
+    with patch(
+        "app.integrations.email_classifier._load_learned_senders",
+        return_value=frozenset(),
+    ):
+        email = _make(subject="Reunião comercial amanhã", sender="qualquer@empresa.com")
+        clf = classify_email(email)
+    assert "IMPORTANT_SENDER_LEARNED" not in clf.audit_tags
+
+
+def test_learned_and_human_sender_both_tagged():
+    """Named sender that is also learned must receive both IMPORTANT_SENDER_LEARNED and IMPORTANT_SENDER."""
+    with patch(
+        "app.integrations.email_classifier._load_learned_senders",
+        return_value=frozenset({"vip@parceiro.com"}),
+    ):
+        email = _make(subject="Proposta", sender="Ana VIP <vip@parceiro.com>")
+        clf = classify_email(email)
+    assert "IMPORTANT_SENDER_LEARNED" in clf.audit_tags
+    assert "IMPORTANT_SENDER" in clf.audit_tags
+    assert "learned_sender" in clf.score_reasons
+    assert "human_sender" in clf.score_reasons
+
+
+def test_learned_sender_short_reason_maps_correctly():
+    """IMPORTANT_SENDER_LEARNED must resolve to 'Remetente prioritário' via build_short_reason."""
+    from app.integrations.email_classifier import build_short_reason
+
+    assert build_short_reason(["IMPORTANT_SENDER_LEARNED"]) == "Remetente prioritário"
