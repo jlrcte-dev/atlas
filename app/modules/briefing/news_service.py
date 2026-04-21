@@ -1,23 +1,37 @@
 """News Briefing service.
 
 Fetches, classifies, scores, deduplicates, and summarizes RSS articles.
+
+Pipeline (summarize_news):
+  1. Date gate       — discard articles not published today (BRT)
+  2. Quality gate    — discard low-quality articles before scoring
+  3. Classification  — classify + score via deterministic engine
+  4. Noise split     — separate noise (ruido) from valid items
+  5. Deduplication   — remove exact-title duplicates, keep highest score
+  6. Ranking         — sort by final_score = score + quality_score*2, then date DESC
+  7. Curation        — top-5, max 3 high + medium only, low discarded
+  8. Diversity       — cap same-category items at 2 when alternatives exist
+  9. Output          — strip internal fields and build response dict
 """
 
 from __future__ import annotations
 
-import re
-from collections import defaultdict
-from datetime import datetime
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime as _parsedate
 
 from app.core.logging import get_logger, log_action
-from app.integrations.news_classifier import classify_news
+from app.integrations.news_classifier import (
+    classify_news,
+    compute_quality_score,
+    is_low_quality,
+    _normalize_text,
+)
 from app.integrations.rss_client import RSSClient
 
 logger = get_logger("services.news")
 
-_PUNCT_RE = re.compile(r'[^\w\s]')
-_SPACE_RE = re.compile(r'\s+')
+_TZ_SP = timezone(timedelta(hours=-3))  # BRT: Brazil abolished DST in 2019, permanently UTC-3
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
@@ -40,10 +54,75 @@ def _parse_published(published: str) -> datetime:
         return datetime.min
 
 
-def _normalize_title(title: str) -> str:
-    """Normalize title for duplicate detection: lowercase, strip punctuation, collapse spaces."""
-    normalized = _PUNCT_RE.sub('', title.lower())
-    return _SPACE_RE.sub(' ', normalized).strip()
+def _is_today_sp(published_str: str) -> bool:
+    """Return True only if the article was published today (America/Sao_Paulo).
+
+    Fail closed: absent, invalid, or unparseable dates return False.
+    Uses the ISO string produced by RSSClient._extract_published.
+    """
+    if not published_str:
+        return False
+    today = datetime.now(_TZ_SP).date()
+    try:
+        dt = datetime.fromisoformat(published_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_TZ_SP)
+        return dt.astimezone(_TZ_SP).date() == today
+    except (ValueError, TypeError):
+        pass
+    try:
+        dt = _parsedate(published_str)
+        return dt.astimezone(_TZ_SP).date() == today
+    except Exception:
+        return False
+
+
+# ── Pipeline: internal field management ──────────────────────────────────────
+
+def _strip_internal_fields(item: dict) -> dict:
+    """Remove all _-prefixed internal fields before API serialization.
+
+    Internal fields (e.g. _normalized_text, _internal_score) carry state
+    for future AI enrichment but must never appear in API responses.
+    """
+    return {k: v for k, v in item.items() if not k.startswith('_')}
+
+
+def _build_item(article) -> dict:
+    """Classify an article and return an enriched item dict.
+
+    Public fields mirror the existing pipeline contract.
+    _-prefixed fields carry internal state for future AI enrichment;
+    they are stripped by _strip_internal_fields before leaving summarize_news.
+    """
+    c = classify_news(article.title, article.summary, article.source)
+    normalized = _normalize_text(f"{article.title} {article.summary}")
+    return {
+        **RSSClient.to_dict(article),
+        "category": c["category"],
+        "flags": c["flags"],
+        "score": c["score"],
+        "priority": c["priority"],
+        "score_reasons": c["score_reasons"],
+        # Internal fields — stripped before API response (see _strip_internal_fields)
+        "_normalized_text": normalized,
+        "_internal_score": c["score"],
+        "_score_reasons_internal": c["score_reasons"],
+        "_flags_internal": c["flags"],
+    }
+
+
+# ── Pipeline: curation helpers ────────────────────────────────────────────────
+
+def _curate_top5(items: list[dict]) -> list[dict]:
+    """Select up to 5 items: max 3 high-priority, remainder medium. Low items discarded.
+
+    Assumes items are already sorted by score DESC so within each tier
+    the highest-scoring articles are chosen first.
+    """
+    high = [i for i in items if i["priority"] == "high"][:3]
+    medium = [i for i in items if i["priority"] == "medium"]
+    return (high + medium)[:5]
 
 
 def _deduplicate_items(items: list[dict]) -> list[dict]:
@@ -58,7 +137,7 @@ def _deduplicate_items(items: list[dict]) -> list[dict]:
     result: list[dict] = []
 
     for item in items:
-        key = _normalize_title(item["title"])
+        key = _normalize_text(item["title"])
 
         if key not in positions:
             positions[key] = len(result)
@@ -75,6 +154,79 @@ def _deduplicate_items(items: list[dict]) -> list[dict]:
                 item["flags"] = {**item["flags"], "is_duplicate_candidate": True}
 
     return result
+
+
+# ── Ranking helpers (Phase B.2) ───────────────────────────────────────────────
+
+_CATEGORY_LABELS: dict[str, str] = {
+    "macro": "Politica monetaria",
+    "mercado": "Mercado de acoes",
+    "politica": "Cenario politico",
+    "internacional": "Economia global",
+    "empresas": "Resultados corporativos",
+    "tecnologia": "Tecnologia",
+    "setorial": "Setorial",
+}
+
+
+def _rank_items(items: list[dict]) -> list[dict]:
+    """Sort by final_score = score + quality_score*2, then published DESC.
+
+    quality_score is computed inline and never stored on the item — contract unchanged.
+    Score remains dominant; quality_score refines ordering within score ties.
+    """
+    def _key(item: dict) -> tuple[int, datetime]:
+        qs = compute_quality_score(item["title"], item.get("summary", ""))
+        return (item["score"] + qs * 2, _parse_published(item.get("published") or ""))
+
+    return sorted(items, key=_key, reverse=True)
+
+
+def _diversify(curated: list[dict], ranked_pool: list[dict]) -> list[dict]:
+    """Soft diversity: cap same-category items at 2 when a valid alternative exists.
+
+    Only triggers when a category appears >= 3 times. Replaces the last (lowest-ranked)
+    excess item with the best alternative of equal or higher priority from ranked_pool.
+    If no valid alternative exists, the original list is returned unchanged.
+    """
+    cat_counts = Counter(i["category"] for i in curated)
+    if max(cat_counts.values(), default=0) < 3:
+        return curated
+
+    result = list(curated)
+    used = {_normalize_text(i["title"]) for i in result}
+    priority_rank = {"high": 2, "medium": 1, "low": 0}
+
+    for cat, count in cat_counts.items():
+        if count < 3:
+            continue
+        excess_idx = max(
+            idx for idx, item in enumerate(result) if item["category"] == cat
+        )
+        excess_item = result[excess_idx]
+        min_pr = priority_rank.get(excess_item["priority"], 0)
+
+        alternative = next(
+            (
+                i for i in ranked_pool
+                if _normalize_text(i["title"]) not in used
+                and i["category"] != cat
+                and priority_rank.get(i["priority"], 0) >= min_pr
+            ),
+            None,
+        )
+        if alternative:
+            used.discard(_normalize_text(excess_item["title"]))
+            used.add(_normalize_text(alternative["title"]))
+            result[excess_idx] = alternative
+
+    return result
+
+
+def _infer_focus(curated: list[dict]) -> list[str]:
+    """Return top-2 category labels from curated items for the summary 'Foco do dia'."""
+    counts = Counter(i["category"] for i in curated if i["category"] != "ruido")
+    return [_CATEGORY_LABELS.get(cat, cat) for cat, _ in counts.most_common(2)]
 
 
 # ── Service ───────────────────────────────────────────────────────────────────
@@ -110,51 +262,59 @@ class NewsService:
         return result
 
     def summarize_news(self) -> dict:
-        """Classify, score, deduplicate, and sort articles into a briefing structure.
+        """Classify, score, deduplicate, curate, and summarize today's articles.
 
         Contract (unchanged):
-          total        — count of valid (non-noise, post-dedup) items
-          categories   — {category: count} excluding ruido
-          by_category  — {category: [items]} including ruido for audit
-          items        — sorted valid items (score DESC, published DESC)
-          summary      — human-readable summary string
+          total        — count of curated items returned in items[]
+          categories   — {category: count} from curated set, excluding ruido
+          by_category  — {category: [items]} curated + ruido audit bucket
+          items        — curated top-5 (score DESC, max 3 high + medium only)
+          summary      — Telegram-aware one-liner (no titles — BriefingService renders items separately)
         """
         articles = self.client.fetch_all()
         all_items: list[dict] = []
+        total_fetched_today = 0
+        low_quality_count = 0
 
-        # Step 1: classify + score every article
+        # ── Layer 1: Date gate ────────────────────────────────────────────────
+        # ── Layer 2: Quality gate ─────────────────────────────────────────────
         for a in articles:
-            c = classify_news(a.title, a.summary, a.source)
-            item = {
-                **RSSClient.to_dict(a),
-                "category": c["category"],
-                "flags": c["flags"],
-                "score": c["score"],
-                "priority": c["priority"],
-                "score_reasons": c["score_reasons"],
-            }
-            all_items.append(item)
+            if not _is_today_sp(a.published):
+                continue
+            total_fetched_today += 1
 
-        # Step 2: separate noise (kept for audit) from valid items
+            if is_low_quality(a.title, a.summary):
+                low_quality_count += 1
+                continue
+
+            # ── Layer 3: Classification ───────────────────────────────────────
+            all_items.append(_build_item(a))
+
+        # ── Layer 4: Noise split ──────────────────────────────────────────────
         noise_items = [i for i in all_items if i["category"] == "ruido"]
         valid_items = [i for i in all_items if i["category"] != "ruido"]
 
-        # Step 3: deduplicate — before sort, keeps highest score per title group
+        # ── Layer 5: Deduplication ────────────────────────────────────────────
         deduped = _deduplicate_items(valid_items)
         # TODO: [V4] detect trending topics across deduplicated items using clustering
 
-        # Step 4: single sort — score DESC, then published DESC
-        # _parse_published handles ISO/RFC2822/empty safely; undated items sort last
-        sorted_items = sorted(
-            deduped,
-            key=lambda i: (i["score"], _parse_published(i.get("published") or "")),
-            reverse=True,
-        )
-        # TODO: [V4] group sorted items by theme for richer briefing sections
+        # ── Layer 6: Ranking ──────────────────────────────────────────────────
+        ranked = _rank_items(deduped)
 
-        # Step 5: recompute by_category from final items + noise for audit
+        # ── Layer 7: Curation ─────────────────────────────────────────────────
+        curated = _curate_top5(ranked)
+
+        # ── Layer 8: Diversity ────────────────────────────────────────────────
+        curated = _diversify(curated, ranked)
+
+        # ── Layer 9: Output ───────────────────────────────────────────────────
+        # Strip internal fields before serialization — must happen before
+        # by_category is built so no internal state leaks to API responses.
+        curated = [_strip_internal_fields(i) for i in curated]
+        noise_items = [_strip_internal_fields(i) for i in noise_items]
+
         by_category: dict[str, list[dict]] = defaultdict(list)
-        for item in sorted_items:
+        for item in curated:
             by_category[item["category"]].append(item)
         for item in noise_items:
             by_category["ruido"].append(item)
@@ -165,19 +325,37 @@ class NewsService:
             if cat != "ruido"
         }
 
-        high_count = sum(1 for i in sorted_items if i["priority"] == "high")
-        high_suffix = f" Destaques: {high_count} de alta prioridade." if high_count else ""
+        high_count = sum(1 for i in curated if i["priority"] == "high")
+        medium_count = sum(1 for i in curated if i["priority"] == "medium")
+        noise_removed = low_quality_count + len(noise_items)
+        focus_topics = _infer_focus(curated)
+
+        # Step 10: Telegram-aware summary — NO titles here; BriefingService iterates items[]
+        focus_lines = "\n".join(f"• {t}" for t in focus_topics) if focus_topics else "• Geral"
+        summary = (
+            f"📰 Radar de Noticias\n\n"
+            f"Foco do dia:\n{focus_lines}\n\n"
+            f"Alta prioridade: {high_count}\n"
+            f"Media prioridade: {medium_count}\n"
+            f"Ruidos removidos: {noise_removed}"
+        )
 
         result = {
-            "total": len(sorted_items),
+            "total": len(curated),
             "categories": categories,
             "by_category": dict(by_category),
-            "items": sorted_items,
-            # TODO: [V4] replace summary string with AI-generated digest of top items
-            "summary": f"{len(sorted_items)} notícia(s) em {len(categories)} categoria(s).{high_suffix}",
+            "items": curated,
+            "summary": summary,
         }
 
-        log_action(logger, "summarize_news", total=len(sorted_items), categories=len(categories), high=high_count)
+        log_action(
+            logger, "summarize_news",
+            fetched_today=total_fetched_today,
+            low_quality=low_quality_count,
+            curated=len(curated),
+            high=high_count,
+            noise=len(noise_items),
+        )
         return result
 
     # Backward compatibility alias
