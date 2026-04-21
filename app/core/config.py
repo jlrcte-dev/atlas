@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./atlas_assistant.db"
     telegram_bot_token: str = ""
     telegram_allowed_user_id: str = ""
+    telegram_admin_chat_id: str = ""
     anthropic_api_key: str = ""
     claude_model: str = "claude-haiku-4-5-20251001"
     google_mcp_base_url: str = ""

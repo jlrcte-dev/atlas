@@ -6,6 +6,7 @@ No extra dependency required — httpx is already in the stack.
 
 from __future__ import annotations
 
+import html
 import httpx
 
 from app.core.config import settings
@@ -14,6 +15,43 @@ from app.core.logging import get_logger
 logger = get_logger("integrations.telegram")
 
 _API_BASE = "https://api.telegram.org/bot{token}"
+_BLOCK_HARD_LIMIT = 4096  # Telegram rejects messages above this length
+_BLOCK_WARN_SIZE = 3500   # warn early before hitting the hard limit
+
+
+def _split_block_by_lines(block: str) -> list[str]:
+    """Split an oversized block into line-safe chunks, each ≤ _BLOCK_HARD_LIMIT chars.
+
+    All HTML tags in our blocks open and close within the same line, so splitting
+    at line boundaries always produces valid HTML — no regex or tag-parsing needed.
+    """
+    if len(block) <= _BLOCK_HARD_LIMIT:
+        return [block]
+
+    lines = block.split("\n")
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for line in lines:
+        line_cost = len(line) + 1  # +1 for the rejoining \n
+        if current and current_len + line_cost > _BLOCK_HARD_LIMIT:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = line_cost
+        else:
+            current.append(line)
+            current_len += line_cost
+
+    if current:
+        chunks.append("\n".join(current))
+
+    return chunks
+
+
+def esc(text: str) -> str:
+    """Escape content for Telegram HTML parse_mode — must be called on ALL dynamic content."""
+    return html.escape(str(text))
 
 
 class TelegramBot:
@@ -47,7 +85,7 @@ class TelegramBot:
         payload: dict = {
             "chat_id": chat_id,
             "text": text,
-            "parse_mode": "Markdown",
+            "parse_mode": "HTML",
         }
         if reply_markup:
             payload["reply_markup"] = reply_markup
@@ -115,19 +153,132 @@ class TelegramBot:
 
     # ── UI helpers ────────────────────────────────────────────────
 
+    # ── Proactive briefing ────────────────────────────────────────
+
     @staticmethod
-    def build_approval_keyboard(draft_id: int) -> dict:
-        """Build an inline keyboard with Approve / Reject buttons."""
+    def format_briefing_blocks(briefing: dict) -> list[str]:
+        """Build 2 HTML blocks from a BriefingService.run_daily_briefing() result.
+
+        Block 1: Agenda + free slots + inbox
+        Block 2: News summary + curated items
+
+        All dynamic content is escaped. Blocks are built to stay well under the
+        4096-char Telegram limit; a warning is logged if one approaches 3500 chars.
+        No regex or HTML parsing is used for truncation.
+        """
+        sections = briefing.get("sections", {})
+        cal = sections.get("calendar", {})
+        free_slots = sections.get("free_slots", [])
+        inbox = sections.get("inbox", {})
+        news = sections.get("news", {})
+
+        # ── Block 1: Agenda + free slots + inbox ──────────────────
+        b1: list[str] = ["<b>📋 Briefing Diario</b>", ""]
+
+        b1.append(f"<b>📅 Agenda</b> — {esc(cal.get('total', 0))} compromisso(s)")
+        for evt in cal.get("events", []):
+            b1.append(f"• {esc(evt.get('start', ''))} | {esc(evt.get('title', ''))}")
+
+        if free_slots:
+            b1.append(f"\n<b>⏰ Horarios livres</b> — {len(free_slots)} slot(s)")
+            for slot in free_slots[:3]:
+                b1.append(
+                    f"• {esc(slot.get('start', ''))}-{esc(slot.get('end', ''))}"
+                    f" ({esc(slot.get('duration_minutes', ''))}min)"
+                )
+
+        b1.append(f"\n<b>📥 Inbox</b>")
+        b1.append(esc(inbox.get("summary", "")))
+        for item in inbox.get("action_items", [])[:5]:
+            b1.append(f"• {esc(item.get('sender', ''))} — {esc(item.get('subject', ''))}")
+
+        block1 = "\n".join(b1)
+
+        # ── Block 2: News ─────────────────────────────────────────
+        # news["summary"] already contains the "📰 Radar de Noticias" header
+        b2: list[str] = [esc(news.get("summary", "")), ""]
+        for item in news.get("items", []):
+            icon = "🔴" if item.get("priority") == "high" else "🟡"
+            b2.append(
+                f"{icon} {esc(item.get('title', ''))}"
+                f" <i>[{esc(item.get('category', ''))}]</i>"
+            )
+
+        block2 = "\n".join(b2)
+
+        return [block1, block2]
+
+    def send_briefing(self, chat_id: str | int, briefing: dict) -> dict:
+        """Send briefing as independent HTML blocks. Continues on per-block failure.
+
+        Oversized blocks are split by line boundary (HTML-safe) before sending.
+        Per-block failures are logged and never crash the application.
+        """
+        blocks = self.format_briefing_blocks(briefing)
+        sent = failed = 0
+
+        for idx, block in enumerate(blocks, 1):
+            if len(block) > _BLOCK_WARN_SIZE:
+                logger.warning(
+                    "Briefing block %d is %d chars — approaching Telegram limit",
+                    idx, len(block),
+                )
+
+            sub_blocks = _split_block_by_lines(block)
+            if len(sub_blocks) > 1:
+                logger.warning(
+                    "Block %d exceeded limit (%d chars) — split into %d sub-blocks",
+                    idx, len(block), len(sub_blocks),
+                )
+
+            for sub_idx, sub_block in enumerate(sub_blocks, 1):
+                label = f"{idx}.{sub_idx}" if len(sub_blocks) > 1 else str(idx)
+                try:
+                    result = self.send_message(chat_id, sub_block)
+                    if result.get("ok"):
+                        sent += 1
+                    else:
+                        failed += 1
+                        logger.error(
+                            "Telegram rejected briefing block %s: %s",
+                            label, result.get("description"),
+                        )
+                except Exception as exc:
+                    failed += 1
+                    logger.error("Unexpected error sending briefing block %s: %s", label, exc)
+
+        return {"sent": sent, "failed": failed, "total_blocks": sent + failed}
+
+    @staticmethod
+    def build_main_menu() -> dict:
+        """Build the main navigation inline keyboard."""
         return {
             "inline_keyboard": [
                 [
-                    {"text": "Aprovar", "callback_data": f"approve:{draft_id}"},
-                    {"text": "Rejeitar", "callback_data": f"reject:{draft_id}"},
-                ]
+                    {"text": "📥 Inbox", "callback_data": "cmd:/inbox"},
+                    {"text": "📅 Agenda", "callback_data": "cmd:/agenda"},
+                ],
+                [
+                    {"text": "📰 Noticias", "callback_data": "cmd:/news"},
+                    {"text": "📑 Briefing", "callback_data": "cmd:/briefing"},
+                ],
+                [
+                    {"text": "⏳ Pendencias", "callback_data": "cmd:/pending"},
+                ],
             ]
         }
 
     @staticmethod
-    def format_message(text: str) -> dict:
-        """Legacy helper — kept for backward compat."""
-        return {"text": text}
+    def build_approval_keyboard(draft_id: int) -> dict:
+        """Build an inline keyboard with Approve / Reject buttons.
+
+        callback_data uses short prefixes (apprv/rejct) to stay well under the 64-byte limit.
+        """
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Aprovar", "callback_data": f"apprv:{draft_id}"},
+                    {"text": "❌ Rejeitar", "callback_data": f"rejct:{draft_id}"},
+                ]
+            ]
+        }
