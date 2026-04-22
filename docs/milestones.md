@@ -114,10 +114,53 @@ Fase de consolidação do motor determinístico antes de qualquer integração c
 | Email Classifier | Estável (V2) | Sim |
 | Inbox Service | Estável (V2) | Sim |
 | Briefing Service | Estável | Sim |
+| Finance Module | Estável (v1.1) | Sim |
 
 O sistema está funcional e foi submetido a audit técnico pré-produção em Abril 2026. O único ajuste blocker identificado (`"desconto"` em `_NOISE`) foi aplicado imediatamente.
 
 **Uso real recomendado:** controlado, com monitoramento ativo nos primeiros dias para validar calibração de score e proporção de itens `high/alta`.
+
+---
+
+### Finance
+
+**Estado inicial:** módulo inexistente. Gerenciamento financeiro pessoal feito inteiramente via planilha externa, sem persistência no Atlas.
+
+**v1.1 — Primeira versão funcional:**
+
+Módulo independente construído sobre SQLite + FastAPI, sem integração com os módulos existentes (inbox, calendar, news). Objetivo: reproduzir a lógica de uma planilha de gerenciamento financeiro pessoal de forma simples, confiável e com precisão numérica garantida.
+
+**Entidades implementadas:**
+
+- `Account` — contas usadas para conferência manual de saldo (XP, Itaú, Nubank etc.)
+- `MonthlyClosing` — saldo inicial do mês; unicidade por `month_ref` garantida em nível de banco
+- `FinancialEntry` — lançamentos de receita/despesa com status (`settled`/`pending`) e tipo (`income`/`expense`)
+- `AccountBalanceSnapshot` — fotografia manual do saldo de cada conta por mês; unicidade por `(account_id, month_ref)`
+
+**Resumo mensal consolidado (`GET /finance/monthly-summary?month=YYYY-MM`):**
+
+Calcula automaticamente: `expenses_paid`, `expenses_pending`, `income_received`, `income_pending`, `current_balance`, `projected_final_balance`, `conference_total`, `conference_difference`. Requer fechamento mensal cadastrado para o mês solicitado; falha explicitamente caso ausente.
+
+**Decisões técnicas:**
+
+- `NUMERIC(14,2)` + `Decimal` (Python) em todos os valores financeiros — nenhum `float`
+- `Decimal(str(value))` no service antes de aritmética — normalização defensiva contra variações do driver SQLite
+- `IntegrityError` capturado nos repositories com `rollback()` explícito → exceções Finance tipadas
+- `StaticPool` no `conftest.py` — necessário para SQLite in-memory com TestClient ASGI
+- Router separado (`finance_routes.py`), registrado em `main.py` com 2 linhas
+- `updated_at` setado explicitamente nos `update()` dos repositories
+
+**Cobertura de testes:** 49 testes (service, validação, cálculo, HTTP). Suite completa: 211/211. Zero regressão.
+
+**Capacidades atuais:**
+
+- Registro e listagem de contas de conferência
+- Fechamento mensal com saldo inicial e unicidade garantida
+- CRUD completo de lançamentos financeiros
+- Registro manual de snapshots de saldo por conta e mês
+- Resumo financeiro consolidado com conferência
+- 5 exceções Finance com códigos estruturados, capturadas pelo handler global (HTTP 400)
+- Validação de `month_ref` via regex em duas camadas (schema + service)
 
 ---
 

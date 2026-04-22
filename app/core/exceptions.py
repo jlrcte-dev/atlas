@@ -37,3 +37,51 @@ class IntegrationError(AtlasError):
         if detail:
             msg += f": {detail}"
         super().__init__(msg, code="INTEGRATION_ERROR")
+
+
+# ── Finance ───────────────────────────────────────────────────────
+
+
+class FinanceError(AtlasError):
+    """Base exception for Finance module errors."""
+
+
+class FinanceNotFoundError(FinanceError):
+    def __init__(self, resource: str, resource_id: int) -> None:
+        super().__init__(
+            f"{resource} #{resource_id} não encontrado.",
+            code="FINANCE_NOT_FOUND",
+        )
+
+
+class FinanceInvalidMonthRefError(FinanceError):
+    def __init__(self, month_ref: str) -> None:
+        super().__init__(
+            f"Formato de month_ref inválido: '{month_ref}'. Use YYYY-MM.",
+            code="FINANCE_INVALID_MONTH_REF",
+        )
+
+
+class FinanceMissingClosingError(FinanceError):
+    def __init__(self, month_ref: str) -> None:
+        super().__init__(
+            f"Nenhum fechamento mensal encontrado para {month_ref}. "
+            "Registre o saldo inicial antes de consultar o resumo.",
+            code="FINANCE_MISSING_CLOSING",
+        )
+
+
+class FinanceDuplicateClosingError(FinanceError):
+    def __init__(self, month_ref: str) -> None:
+        super().__init__(
+            f"Já existe um fechamento mensal para {month_ref}.",
+            code="FINANCE_DUPLICATE_CLOSING",
+        )
+
+
+class FinanceDuplicateSnapshotError(FinanceError):
+    def __init__(self, account_id: int, month_ref: str) -> None:
+        super().__init__(
+            f"Já existe um snapshot para a conta #{account_id} em {month_ref}.",
+            code="FINANCE_DUPLICATE_SNAPSHOT",
+        )

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.api.rest.finance_routes import finance_router
 from app.api.rest.routes import router
 from app.core.config import settings
 from app.core.exceptions import AtlasError
@@ -23,6 +24,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
 
 app = FastAPI(title=settings.app_name, version="0.2.0", lifespan=lifespan)
 app.include_router(router)
+app.include_router(finance_router)
 
 
 @app.exception_handler(AtlasError)
