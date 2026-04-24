@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -157,6 +158,16 @@ class AccountRepository:
 
     def get(self, account_id: int) -> Account | None:
         return self.db.get(Account, account_id)
+
+    def get_by_name(self, name: str) -> Account | None:
+        """Case-insensitive lookup by account name. Returns None if not found."""
+        if not name:
+            return None
+        return (
+            self.db.query(Account)
+            .filter(func.lower(Account.name) == name.lower())
+            .first()
+        )
 
     def list_all(self) -> list[Account]:
         return self.db.query(Account).order_by(Account.name).all()

@@ -77,6 +77,16 @@ class FinanceService:
         account = self._accounts.update(account, **changes)
         return AccountResponse.model_validate(account)
 
+    def get_account_by_name(self, name: str) -> AccountResponse | None:
+        """Case-insensitive lookup by name. Returns None if not found.
+
+        Used by the Telegram integration to resolve commands like `/balance XP 1850`.
+        """
+        account = self._accounts.get_by_name(name)
+        if account is None:
+            return None
+        return AccountResponse.model_validate(account)
+
     # ── MonthlyClosing ────────────────────────────────────────────
 
     def get_monthly_closing(self, month_ref: str) -> MonthlyClosingResponse:
@@ -182,6 +192,42 @@ class FinanceService:
             raise FinanceNotFoundError("Snapshot", snapshot_id)
         changes = payload.model_dump(exclude_none=True)
         snapshot = self._snapshots.update(snapshot, **changes)
+        return AccountBalanceSnapshotResponse.model_validate(snapshot)
+
+    def upsert_snapshot(
+        self,
+        account_id: int,
+        month_ref: str,
+        balance: Decimal,
+        reference_date: str | None = None,
+        notes: str | None = None,
+    ) -> AccountBalanceSnapshotResponse:
+        """Create a snapshot if none exists for (account_id, month_ref), else update.
+
+        Used by the Telegram integration: `/balance <conta> <valor>` should register
+        or update the current month's snapshot atomically from the user's point of view.
+        """
+        _validate_month_ref(month_ref)
+        account = self._accounts.get(account_id)
+        if account is None:
+            raise FinanceNotFoundError("Conta", account_id)
+
+        existing = self._snapshots.get_by_account_month(account_id, month_ref)
+        if existing is None:
+            snapshot = self._snapshots.create(
+                account_id=account_id,
+                month_ref=month_ref,
+                balance=balance,
+                reference_date=reference_date,
+                notes=notes,
+            )
+        else:
+            updates: dict[str, object] = {"balance": balance}
+            if reference_date is not None:
+                updates["reference_date"] = reference_date
+            if notes is not None:
+                updates["notes"] = notes
+            snapshot = self._snapshots.update(existing, **updates)
         return AccountBalanceSnapshotResponse.model_validate(snapshot)
 
     # ── Monthly Summary ───────────────────────────────────────────

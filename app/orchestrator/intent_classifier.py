@@ -20,6 +20,10 @@ class Intent(StrEnum):
     GET_DAILY_BRIEFING = "get_daily_briefing"
     APPROVE_ACTION = "approve_action"
     REJECT_ACTION = "reject_action"
+    GET_FINANCE_SUMMARY = "get_finance_summary"
+    CREATE_FINANCE_EXPENSE = "create_finance_expense"
+    CREATE_FINANCE_INCOME = "create_finance_income"
+    SET_FINANCE_BALANCE = "set_finance_balance"
     HELP = "help"
     UNKNOWN = "unknown"
 
@@ -47,9 +51,19 @@ _COMMAND_MAP: dict[str, Intent] = {
     "/aprovar": Intent.APPROVE_ACTION,
     "/reject": Intent.REJECT_ACTION,
     "/rejeitar": Intent.REJECT_ACTION,
+    "/finance": Intent.GET_FINANCE_SUMMARY,
+    "/expense": Intent.CREATE_FINANCE_EXPENSE,
+    "/income": Intent.CREATE_FINANCE_INCOME,
+    "/balance": Intent.SET_FINANCE_BALANCE,
     "/help": Intent.HELP,
     "/ajuda": Intent.HELP,
 }
+
+# Commands that consume the raw tail (case-preserved) as free-form arguments.
+# Avoids lowercasing descriptions and account names during classification.
+_FINANCE_COMMANDS: frozenset[str] = frozenset(
+    {"/finance", "/expense", "/income", "/balance"}
+)
 
 # ── Pattern definitions ───────────────────────────────────────────
 # Order matters: more specific intents first.
@@ -184,12 +198,13 @@ class IntentClassifier:
     """
 
     def classify(self, message: str) -> ClassifiedIntent:
-        lowered = message.lower().strip()
+        stripped = message.strip()
+        lowered = stripped.lower()
         params = _extract_params(lowered)
 
         # Priority 1: Telegram slash-commands
         if lowered.startswith("/"):
-            return _classify_command(lowered, params)
+            return _classify_command(lowered, stripped, params)
 
         # Priority 2: Multi-word phrases (high specificity)
         for intent, phrases, _kw in _INTENT_PATTERNS:
@@ -215,8 +230,10 @@ class IntentClassifier:
 # ── Private helpers ───────────────────────────────────────────────
 
 
-def _classify_command(message: str, params: dict[str, str]) -> ClassifiedIntent:
-    parts = message.split()
+def _classify_command(
+    lowered: str, original: str, params: dict[str, str]
+) -> ClassifiedIntent:
+    parts = lowered.split()
     command = parts[0].split("@")[0]  # strip @botname suffix
 
     if command == "/start":
@@ -231,6 +248,13 @@ def _classify_command(message: str, params: dict[str, str]) -> ClassifiedIntent:
     # Extract ID from command args: /approve 42
     if len(parts) > 1 and parts[1].isdigit():
         params = {**params, "action_id": parts[1]}
+
+    # Capture raw args for finance commands, preserving original case (for
+    # descriptions and account names).
+    if command in _FINANCE_COMMANDS:
+        raw_parts = original.split(maxsplit=1)
+        if len(raw_parts) > 1 and raw_parts[1].strip():
+            params = {**params, "raw_args": raw_parts[1].strip()}
 
     return ClassifiedIntent(intent=intent, confidence=1.0, params=params)
 

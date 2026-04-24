@@ -1,7 +1,7 @@
 # Módulo Finance — v1.1
 
-> **Status:** Implementado e encerrado. Audit técnico pré-commit executado em Abril 2026.
-> **Testes:** 49/49 passando. Suite completa: 211/211.
+> **Status:** Implementado e encerrado. Audit técnico executado em Abril 2026.
+> **Testes:** 59 Telegram + 49 REST + outros = 270 total. Suite completa: 268/270 passando (2 falhas pré-existentes no módulo de news, não relacionadas).
 
 ---
 
@@ -25,7 +25,8 @@ app/
 │   └── finance/
 │       ├── __init__.py
 │       ├── schemas.py             # Pydantic v2 — Create/Update/Response por entidade
-│       └── service.py             # FinanceService — toda a lógica de negócio
+│       ├── service.py             # FinanceService — toda a lógica de negócio
+│       └── telegram.py            # Parser + formatter Telegram (sem estado, sem I/O)
 └── api/rest/
     └── finance_routes.py          # APIRouter(prefix="/finance") — 13 endpoints
 ```
@@ -213,24 +214,243 @@ A coluna `updated_at` usa `default=_utcnow` (valor de criação). Atualizações
 
 ---
 
+## Integração Telegram (v1.1)
+
+Quatro comandos disponíveis no bot do Telegram. Toda lógica financeira permanece no `FinanceService` — o Telegram é exclusivamente interface (parser + formatter).
+
+### Arquitetura
+
+```
+Telegram message
+    └─ webhook (POST /telegram/webhook)
+        └─ Orchestrator.handle_request()
+            └─ IntentClassifier          (identifica comando, preserva case dos args)
+            └─ _handle_finance_*         (handler por intent)
+                ├─ finance/telegram.py   (parse_* + format_* — sem estado, sem I/O)
+                └─ FinanceService        (lógica de negócio — intacto)
+```
+
+**Separação de responsabilidades:**
+
+| Camada | Arquivo | Responsabilidade |
+|---|---|---|
+| Entrada | `app/integrations/telegram_client.py` | Receber update, autorizar, despachar |
+| Roteamento | `app/orchestrator/orchestrator.py` | Classificar intent, chamar handler |
+| Parsing/Formatação | `app/modules/finance/telegram.py` | Interpretar args, formatar respostas |
+| Negócio | `app/modules/finance/service.py` | Persistir, calcular, validar domínio |
+
+### Comandos suportados
+
+| Comando | Descrição | Exemplo |
+|---|---|---|
+| `/finance` | Resumo do mês atual | `/finance` |
+| `/finance YYYY-MM` | Resumo de mês específico | `/finance 2026-04` |
+| `/expense <valor> <descrição>` | Registrar despesa | `/expense 250 Mercado` |
+| `/income <valor> <descrição>` | Registrar receita | `/income 5000 Salário` |
+| `/balance <conta> <valor>` | Atualizar saldo da conta | `/balance XP 1850` |
+
+### Formato de valores
+
+> **Corrigido em v1.1** — versão anterior aceitava `1.500` como `R$ 1,50` silenciosamente (bug crítico identificado no audit).
+
+**Aceitos:**
+
+| Entrada | Resultado |
+|---|---|
+| `1500` | `Decimal("1500")` |
+| `1500.00` | `Decimal("1500.00")` |
+| `1500,00` | `Decimal("1500.00")` |
+| `250` | `Decimal("250")` |
+| `250.00` | `Decimal("250.00")` |
+| `250,00` | `Decimal("250.00")` |
+
+**Rejeitados como ambíguos** (separador único + 3 dígitos = padrão de milhar):
+
+| Entrada | Motivo                                           |
+| ------- | ------------------------------------------------ |
+| `1.500` | Poderia ser 1,5 (decimal US) ou 1500 (milhar BR) |
+| `1,500` | Poderia ser 1,5 (decimal BR) ou 1500 (milhar US) |
+
+**Não suportados em v1.1** (ambos os separadores):
+
+| Entrada    | Motivo                                |
+| ---------- | ------------------------------------- |
+| `1.500,00` | Formato milhar brasileiro com decimal |
+| `1.234,56` | Idem                                  |
+
+**Mensagem padrão para ambíguos e não suportados:**
+
+```
+❌ Valor ambíguo. Use 1500, 1500.00 ou 1500,00.
+```
+
+**Lógica de detecção em `parse_amount`:**
+
+1. Se contém `.` **e** `,` → ambos os separadores → rejeita
+2. Se contém apenas `.` ou apenas `,` e o sufixo tem exatamente 3 dígitos → padrão de milhar → rejeita
+3. Normaliza `,` → `.` e interpreta como `Decimal`
+
+### Regras de parsing por comando
+
+**`/expense` e `/income`:**
+
+- Primeiro token = valor; restante = descrição
+- Descrição é obrigatória; case preservado (`Atacadão`, `Salário CLT`)
+- `month_ref` = mês atual; `due_date` e `settlement_date` = hoje
+- Entrada criada com `status=settled`
+
+**`/balance`:**
+
+- Último token = valor; tudo antes = nome da conta (suporta nomes multi-palavra)
+- Lookup por nome é case-insensitive (`nubank` encontra `Nubank`)
+- Se já existe snapshot para `(conta, mês atual)`: **atualiza** o saldo (upsert)
+- Se não existe: cria novo com `reference_date = hoje`
+
+**`/finance`:**
+
+- Sem argumento: mês atual (`datetime.now().strftime("%Y-%m")`)
+- Com argumento: valida contra regex `^\d{4}-\d{2}$`
+
+### Tratamento de erros
+
+Nunca falham silenciosamente. Todas as mensagens começam com `❌`:
+
+| Situação | Mensagem |
+|---|---|
+| Valor não numérico | `❌ Valor inválido. Use formato 250.00` |
+| Valor ≤ 0 | `❌ Valor inválido. Use formato 250.00` |
+| Valor ambíguo (`1.500`, `1,500`) | `❌ Valor ambíguo. Use 1500, 1500.00 ou 1500,00.` |
+| Formato com ambos separadores | `❌ Valor ambíguo. Use 1500, 1500.00 ou 1500,00.` |
+| Descrição ausente | `❌ Descrição obrigatória` |
+| Conta inexistente no `/balance` | `❌ Conta não encontrada: <nome>` |
+| Formato inválido no `/balance` | `❌ Formato inválido. Use: /balance <conta> <valor>` |
+| `month_ref` fora do padrão YYYY-MM | `❌ Mês inválido. Use YYYY-MM` |
+| Resumo sem fechamento cadastrado | `❌ Não existe fechamento para o mês informado` |
+
+### Exemplos de resposta
+
+**`/finance` (sucesso):**
+
+```
+📊 Financeiro — 2026-04
+
+Saldo inicial: R$ 1.000,00
+Recebido: R$ 3.000,00
+A receber: R$ 500,00
+Pago: R$ 800,00
+A pagar: R$ 200,00
+
+Saldo atual: R$ 3.200,00
+Saldo final: R$ 3.500,00
+
+Conferência: R$ 3.200,00
+Diferença: R$ 0,00
+
+Contas:
+- Nubank: R$ 1.200,00
+- XP: R$ 2.000,00
+```
+
+**`/expense` (sucesso):**
+
+```
+✅ Despesa registrada
+R$ 250,00 — Atacadão
+```
+
+**`/income` (sucesso):**
+
+```
+✅ Receita registrada
+R$ 8.000,00 — Salário
+```
+
+**`/balance` (sucesso):**
+
+```
+✅ Saldo registrado
+XP — R$ 1.850,00
+```
+
+### Testes
+
+`tests/test_finance_telegram.py` — 59 testes dedicados à integração Telegram.
+
+| Grupo | Cobertura |
+|---|---|
+| `parse_amount` | Inteiro, ponto decimal, vírgula decimal, zeros, negativos, não numérico, ambíguos (`1.500`, `1,500`), milhar BR (`1.500,00`, `1.234,56`) |
+| `parse_entry_args` | Descrição simples, multi-palavra, ausente, vazio, valor inválido |
+| `parse_balance_args` | Conta simples, multi-palavra, valor ausente, vazio, valor inválido |
+| `parse_month_ref` | None, vazio, espaços, válido, formato errado |
+| `format_amount` | Pequeno, com milhar, zero, negativo |
+| `IntentClassifier` | `/finance`, `/finance YYYY-MM`, `/expense`, `/income`, `/balance`, regressão `/approve` |
+| Orchestrator `/finance` | Mês atual, mês específico, formato inválido, sem fechamento |
+| Orchestrator `/expense` | Válido (persistência), sem descrição, valor inválido, sem args |
+| Orchestrator `/income` | Válido (persistência, type=income) |
+| Orchestrator `/balance` | Válido, case-insensitive, multi-palavra, conta inexistente, formato inválido, upsert |
+| Integração E2E | Expense → summary, income → summary, balance → conferência |
+| `format_summary` standalone | Exercício direto com `MonthlySummaryResponse` real |
+
+### Limitações v1.1
+
+Comportamentos deliberadamente fora do escopo desta versão:
+
+- **Sem edição ou delete via Telegram** — operações destrutivas apenas via REST
+- **Sem listagem de lançamentos** — apenas resumo agregado via `/finance`
+- **Sem filtros** por categoria, tipo ou status
+- **Sem fluxos multi-step ou inline keyboards**
+- **Sem linguagem natural** — apenas slash commands estritamente tipados
+- **Conta não criada automaticamente** — conta deve existir previamente (via REST)
+- **Sem confirmação antes de registrar** — comandos executam imediatamente
+- **Sem /undo** — desfazer requer uso da API REST
+- **Single-user** — sem controle de acesso por usuário do Telegram
+
+---
+
+## Próximos passos (v2)
+
+Funcionalidades identificadas para iteração futura:
+
+- `/expenses` — listagem dos lançamentos do mês
+- `/undo` — desfazer o último lançamento registrado
+- Edição e deleção de lançamentos via Telegram
+- NLP para entrada em linguagem natural ("gastei 250 no mercado")
+- Inline keyboards para confirmação antes de registrar
+- Suporte a separador de milhar brasileiro (`1.234,56`)
+
+---
+
 ## Audit Técnico
 
-> Executado em Abril 2026, antes do commit de encerramento da fase.
+### Finance REST v1.1 (Abril 2026)
 
 | Item | Resultado | Detalhe |
 |---|---|---|
 | Precisão financeira | ✅ OK | `Numeric(14,2)` nos 3 modelos; `Decimal(str(v))` no service; zero `float` |
 | Unicidade MonthlyClosing | ✅ OK | `UniqueConstraint` + `unique=True` + `IntegrityError` → rollback explícito |
 | Unicidade Snapshot | ✅ OK | `UniqueConstraint(account_id, month_ref)` + `IntegrityError` → rollback |
-| Fórmulas do resumo | ✅ OK | Aderentes à spec em `service.py:219-236` |
+| Fórmulas do resumo | ✅ OK | Aderentes à spec em `service.py` |
 | Erros explícitos | ✅ OK | 5 exceções com código estruturado; handler global HTTP 400 |
 | Naming | ✅ OK | Código inglês, mensagens português, consistente com o projeto |
 | Estrutura do módulo | ✅ OK | models → repositories → schemas → service → routes |
 | Inicialização do app | ✅ OK | 2 linhas em `main.py`; tabelas auto-criadas; zero impacto no lifespan |
-| Cobertura de testes | ✅ OK | 49 testes; cenários críticos cobertos |
-| Regressão | ✅ ZERO | 211/211 na suite completa |
+| Cobertura de testes | ✅ OK | 49 testes REST; cenários críticos cobertos |
+| Regressão | ✅ ZERO | Suite completa passando |
 
-**Conclusão:** módulo íntegro. Nenhuma correção estrutural necessária. Encerrado nesta fase.
+### Finance + Telegram v1.1 (Abril 2026)
+
+| Item | Resultado | Detalhe |
+|---|---|---|
+| Bug crítico `parse_amount("1.500")` | ✅ CORRIGIDO | Era aceito como `R$ 1,50`; agora rejeitado com mensagem explícita |
+| Separação parser/service | ✅ OK | `telegram.py` sem estado, sem I/O; `FinanceService` intacto |
+| Decimal end-to-end | ✅ OK | Parser → handler → service sem conversão float |
+| Case preservation | ✅ OK | `/expense 250 Atacadão` preserva "Atacadão" |
+| Upsert de snapshot | ✅ OK | `/balance` repetido atualiza em vez de duplicar |
+| Erros em português | ✅ OK | Todas as mensagens `❌` claras e sem stack trace |
+| Cobertura de testes | ✅ OK | 59 testes Telegram; parser, formatter, classifier, handlers, E2E |
+| Regressão | ✅ ZERO | Nenhum teste pré-existente quebrado |
+
+**Conclusão v1.1:** módulo íntegro. Bug crítico de parsing corrigido e validado. Encerrado nesta fase.
 
 ---
 
@@ -248,18 +468,16 @@ Comportamentos deliberadamente fora do escopo desta versão:
 
 ---
 
-## Known Limitations (riscos residuais identificados no audit)
-
-Comportamentos existentes que não constituem bugs críticos, mas devem ser conhecidos:
+## Known Limitations (riscos residuais)
 
 **1. `month_ref` aceita meses semanticamente inválidos**
 
-A validação atual usa a regex `^\d{4}-\d{2}$`, que garante o formato `YYYY-MM` mas não valida a semântica do mês. Valores como `2026-13` (mês 13) ou `2026-00` (mês 0) são aceitos sem erro. Não há impacto nos cálculos do resumo — o dado é agrupado normalmente. Correção possível em versão futura com validação de range `01-12`.
+A validação usa a regex `^\d{4}-\d{2}$`, que garante o formato `YYYY-MM` mas não valida a semântica. Valores como `2026-13` ou `2026-00` são aceitos. Não há impacto nos cálculos — o dado é agrupado normalmente. Correção possível com validação de range `01-12` em versão futura.
 
-**2. `amount` não valida valor positivo**
+**2. `amount` não valida valor positivo na camada REST**
 
-O campo `amount` em `FinancialEntry` aceita valores negativos sem rejeição. Não há validação `amount > 0` na camada de schema nem no service. Para uso pessoal com dados inseridos manualmente, o comportamento é aceitável — o usuário controla o que insere. Se necessário, pode ser adicionado como `field_validator` em `FinancialEntryCreate` em versão futura.
+O campo `amount` em `FinancialEntryCreate` aceita valores negativos via REST sem rejeição. Via Telegram, `parse_amount` já rejeita valores ≤ 0. Para uso pessoal com dados manuais, o comportamento REST é aceitável.
 
 **3. N+1 query no cálculo do resumo mensal**
 
-Para cada `AccountBalanceSnapshot` retornado, `get_monthly_summary()` executa uma query separada para buscar a `Account` correspondente. O comportamento é correto; o custo é irrelevante para volume pessoal (≤ 10 contas por mês). Resolvível com `joinedload` se o volume crescer.
+Para cada `AccountBalanceSnapshot` retornado, `get_monthly_summary()` executa uma query separada para buscar a `Account` correspondente. Custo irrelevante para volume pessoal (≤ 10 contas/mês). Resolvível com `joinedload` se necessário.
