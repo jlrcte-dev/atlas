@@ -290,6 +290,9 @@ class TelegramBot:
         return {
             "inline_keyboard": [
                 [
+                    {"text": "💰 Finanças", "callback_data": "fin:menu"},
+                ],
+                [
                     {"text": "📥 Inbox", "callback_data": "cmd:/inbox"},
                     {"text": "📅 Agenda", "callback_data": "cmd:/agenda"},
                 ],
@@ -300,6 +303,19 @@ class TelegramBot:
                 [
                     {"text": "⏳ Pendencias", "callback_data": "cmd:/pending"},
                 ],
+            ]
+        }
+
+    @staticmethod
+    def build_finance_menu() -> dict:
+        """Build the Finance module inline keyboard."""
+        return {
+            "inline_keyboard": [
+                [{"text": "📊 Resumo do mês", "callback_data": "fin:sum"}],
+                [{"text": "➕ Como lançar despesa", "callback_data": "fin:help_exp"}],
+                [{"text": "➕ Como lançar receita", "callback_data": "fin:help_inc"}],
+                [{"text": "🏦 Como atualizar saldo", "callback_data": "fin:help_bal"}],
+                [{"text": "⬅️ Voltar", "callback_data": "fin:back"}],
             ]
         }
 

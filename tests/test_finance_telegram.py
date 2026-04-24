@@ -89,15 +89,21 @@ def test_parse_amount_ambiguous_comma_thousands_raises():
     assert "Valor ambíguo" in str(excinfo.value)
 
 
-def test_parse_amount_both_separators_raises():
-    with pytest.raises(FinanceTelegramError) as excinfo:
-        parse_amount("1.500,00")
-    assert "Valor ambíguo" in str(excinfo.value)
+def test_parse_amount_br_full_1500_comma_00():
+    assert parse_amount("1.500,00") == Decimal("1500.00")
 
 
-def test_parse_amount_brazilian_milhar_raises():
+def test_parse_amount_br_full_1234_56():
+    assert parse_amount("1.234,56") == Decimal("1234.56")
+
+
+def test_parse_amount_br_full_1250_50():
+    assert parse_amount("1.250,50") == Decimal("1250.50")
+
+
+def test_parse_amount_us_format_raises():
     with pytest.raises(FinanceTelegramError) as excinfo:
-        parse_amount("1.234,56")
+        parse_amount("1,250.50")
     assert "Valor ambíguo" in str(excinfo.value)
 
 
@@ -188,6 +194,25 @@ def test_parse_month_ref_invalid_format_raises():
 def test_parse_month_ref_invalid_format_slash_raises():
     with pytest.raises(FinanceTelegramError):
         parse_month_ref("2026/04")
+
+
+def test_parse_month_ref_month_13_raises():
+    with pytest.raises(FinanceTelegramError) as excinfo:
+        parse_month_ref("2026-13")
+    assert "Mês inválido" in str(excinfo.value)
+
+
+def test_parse_month_ref_month_00_raises():
+    with pytest.raises(FinanceTelegramError):
+        parse_month_ref("2026-00")
+
+
+def test_parse_month_ref_december_valid():
+    assert parse_month_ref("2026-12") == "2026-12"
+
+
+def test_parse_month_ref_january_valid():
+    assert parse_month_ref("2026-01") == "2026-01"
 
 
 # ── Formatters ────────────────────────────────────────────────────
@@ -282,6 +307,18 @@ def test_finance_summary_specific_month(db_session):
 
 def test_finance_summary_invalid_month_format(db_session):
     result = Orchestrator(db_session).handle_request("u1", "/finance abril")
+    assert result["success"] is False
+    assert "Mês inválido" in result["message"]
+
+
+def test_finance_summary_month_13_invalid(db_session):
+    result = Orchestrator(db_session).handle_request("u1", "/finance 2026-13")
+    assert result["success"] is False
+    assert "Mês inválido" in result["message"]
+
+
+def test_finance_summary_month_00_invalid(db_session):
+    result = Orchestrator(db_session).handle_request("u1", "/finance 2026-00")
     assert result["success"] is False
     assert "Mês inválido" in result["message"]
 
@@ -464,3 +501,41 @@ def test_format_summary_standalone(db_session):
     formatted = format_summary(summary)
     assert "📊 Financeiro — 2026-04" in formatted
     assert "Saldo inicial: R$ 1.000,00" in formatted
+
+
+# ── Parsing moeda BR (v1.2) ───────────────────────────────────────
+
+
+def test_expense_br_full_format(db_session):
+    """BR full format (dot=milhar, comma=decimal) accepted via /expense."""
+    result = Orchestrator(db_session).handle_request("u1", "/expense 1.250,50 Mercado")
+    assert result["success"] is True
+    assert "R$ 1.250,50" in result["message"]
+
+
+def test_income_br_full_format(db_session):
+    result = Orchestrator(db_session).handle_request("u1", "/income 5.000,00 Salário")
+    assert result["success"] is True
+    assert "R$ 5.000,00" in result["message"]
+
+
+# ── Segurança: autorização ────────────────────────────────────────
+
+
+def test_telegram_bot_authorized_no_restriction():
+    """With no user ID restriction configured, all users are authorized."""
+    from app.integrations.telegram_bot import TelegramBot
+    bot = TelegramBot()
+    # telegram_allowed_user_id defaults to empty → all users authorized
+    if not bot.allowed_user_id:
+        assert bot.is_authorized("any_user") is True
+        assert bot.is_authorized("12345") is True
+
+
+def test_telegram_bot_authorized_specific_user():
+    """With restriction set, only the configured user passes."""
+    from app.integrations.telegram_bot import TelegramBot
+    bot = TelegramBot()
+    bot.allowed_user_id = "42"
+    assert bot.is_authorized("42") is True
+    assert bot.is_authorized("99") is False

@@ -214,20 +214,30 @@ def _handle_reject(orch: Orchestrator, user_id: str, ci: ClassifiedIntent) -> di
 def _handle_help(_orch: Orchestrator, _user_id: str, ci: ClassifiedIntent) -> dict:
     is_welcome = ci.params.get("welcome") == "true"
     commands = [
-        "/inbox    — Resumo da caixa de entrada",
-        "/agenda   — Agenda do dia + horarios livres",
-        "/news     — Briefing de noticias",
-        "/briefing — Briefing diario completo",
-        "/approve {id} — Aprovar acao pendente",
-        "/reject  {id} — Rejeitar acao pendente",
-        "/finance [YYYY-MM] — Resumo financeiro do mes",
-        "/expense <valor> <descricao> — Registrar despesa",
-        "/income  <valor> <descricao> — Registrar receita",
-        "/balance <conta> <valor>     — Registrar saldo de conta",
-        "/help         — Mostrar esta ajuda",
+        "💰 Finance:",
+        "  /finance [YYYY-MM]        — Resumo financeiro do mes",
+        "  /expense <valor> <desc>   — Registrar despesa",
+        "  /income  <valor> <desc>   — Registrar receita",
+        "  /balance <conta> <valor>  — Registrar saldo de conta",
+        "",
+        "📅 Agenda:",
+        "  /agenda  — Agenda do dia + horarios livres",
+        "",
+        "📥 Inbox:",
+        "  /inbox   — Resumo da caixa de entrada",
+        "",
+        "📰 Noticias:",
+        "  /news     — Briefing de noticias",
+        "  /briefing — Briefing diario completo",
+        "",
+        "✅ Aprovacoes:",
+        "  /approve {id} — Aprovar acao pendente",
+        "  /reject  {id} — Rejeitar acao pendente",
+        "",
+        "ℹ️ /help — Mostrar esta ajuda",
     ]
-    header = "Atlas AI Assistant iniciado.\n" if is_welcome else ""
-    message = header + "Comandos disponiveis:\n" + "\n".join(commands)
+    header = "Atlas AI Assistant iniciado.\n\n" if is_welcome else ""
+    message = header + "Comandos disponiveis:\n\n" + "\n".join(commands)
     return {"success": True, "data": {"commands": commands}, "message": message}
 
 
@@ -249,7 +259,7 @@ def _handle_finance_summary(orch: Orchestrator, _user_id: str, ci: ClassifiedInt
             "message": "❌ Não existe fechamento para o mês informado",
         }
     except FinanceInvalidMonthRefError:
-        return {"success": False, "data": {}, "message": "❌ Mês inválido. Use YYYY-MM"}
+        return {"success": False, "data": {}, "message": "❌ Mês inválido. Use YYYY-MM válido."}
 
     return {
         "success": True,

@@ -15,7 +15,8 @@ from app.modules.finance.schemas import (
     MonthlySummaryResponse,
 )
 
-_MONTH_REF_RE = re.compile(r"^\d{4}-\d{2}$")
+_MONTH_REF_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_BR_FORMAT_RE = re.compile(r"^\d{1,3}(\.\d{3})*,\d{1,2}$")
 
 
 class FinanceTelegramError(ValueError):
@@ -42,9 +43,16 @@ def today_iso() -> str:
 
 
 def parse_amount(raw: str) -> Decimal:
-    """Parse a monetary value. Accepts '250', '250.00', '250,00'. Must be > 0.
+    """Parse a monetary value. Must be > 0.
 
-    Rejects ambiguous thousands-separator formats ('1.500', '1,500', '1.500,00').
+    Accepted formats:
+      250 / 1500              — integer
+      250.00 / 1500.00        — US decimal (dot)
+      250,00 / 1500,00        — BR decimal (comma)
+      1.500,00 / 1.234,56     — BR full format (dot=milhar, comma=decimal)
+
+    Rejected (ambiguous single separator + 3 digits):
+      1.500 / 1,500
     """
     if raw is None or not raw.strip():
         raise FinanceTelegramError("❌ Valor inválido. Use formato 250.00")
@@ -53,18 +61,22 @@ def parse_amount(raw: str) -> Decimal:
     has_dot = "." in stripped
     has_comma = "," in stripped
 
-    # Reject formats with both separators (e.g. "1.500,00" or "1.234,56")
     if has_dot and has_comma:
-        raise FinanceTelegramError("❌ Valor ambíguo. Use 1500, 1500.00 ou 1500,00.")
-
-    # Reject single separator followed by exactly 3 digits (thousands pattern)
-    if has_dot or has_comma:
+        # Accept Brazilian full format: X.XXX,XX — dot=milhar, comma=decimal
+        if _BR_FORMAT_RE.match(stripped):
+            normalized = stripped.replace(".", "").replace(",", ".")
+        else:
+            raise FinanceTelegramError("❌ Valor ambíguo. Use 1500, 1500.00 ou 1500,00.")
+    elif has_dot or has_comma:
+        # Reject single separator followed by exactly 3 digits (ambiguous thousands)
         sep = "." if has_dot else ","
         tail = stripped[stripped.rfind(sep) + 1:]
         if len(tail) == 3 and tail.isdigit():
             raise FinanceTelegramError("❌ Valor ambíguo. Use 1500, 1500.00 ou 1500,00.")
+        normalized = stripped.replace(",", ".")
+    else:
+        normalized = stripped
 
-    normalized = stripped.replace(",", ".")
     try:
         value = Decimal(normalized)
     except InvalidOperation:
@@ -125,7 +137,7 @@ def parse_month_ref(raw_args: str | None) -> str:
         return current_month_ref()
     candidate = raw_args.strip()
     if not _MONTH_REF_RE.match(candidate):
-        raise FinanceTelegramError("❌ Mês inválido. Use YYYY-MM")
+        raise FinanceTelegramError("❌ Mês inválido. Use YYYY-MM válido.")
     return candidate
 
 

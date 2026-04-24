@@ -38,7 +38,7 @@ from app.modules.finance.schemas import (
 
 logger = get_logger("modules.finance")
 
-_MONTH_REF_RE = re.compile(r"^\d{4}-\d{2}$")
+_MONTH_REF_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 def _validate_month_ref(month_ref: str) -> None:
@@ -281,12 +281,7 @@ class FinanceService:
         conference_total = sum((s.balance for s in account_summaries), zero)
         conference_difference = conference_total - current_balance
 
-        logger.info(
-            "Resumo calculado: month=%s balance=%s conference_diff=%s",
-            month_ref,
-            current_balance,
-            conference_difference,
-        )
+        logger.info("Resumo calculado: month=%s", month_ref)
 
         return MonthlySummaryResponse(
             month_ref=month_ref,

@@ -1,7 +1,7 @@
-# Módulo Finance — v1.1
+# Módulo Finance — v1.2
 
 > **Status:** Implementado e encerrado. Audit técnico executado em Abril 2026.
-> **Testes:** 59 Telegram + 49 REST + outros = 270 total. Suite completa: 268/270 passando (2 falhas pré-existentes no módulo de news, não relacionadas).
+> **Testes:** 71 Telegram + 49 REST + outros = 282 total. Suite completa: 282/282 passando.
 
 ---
 
@@ -214,7 +214,7 @@ A coluna `updated_at` usa `default=_utcnow` (valor de criação). Atualizações
 
 ---
 
-## Integração Telegram (v1.1)
+## Integração Telegram (v1.2)
 
 Quatro comandos disponíveis no bot do Telegram. Toda lógica financeira permanece no `FinanceService` — o Telegram é exclusivamente interface (parser + formatter).
 
@@ -251,7 +251,8 @@ Telegram message
 
 ### Formato de valores
 
-> **Corrigido em v1.1** — versão anterior aceitava `1.500` como `R$ 1,50` silenciosamente (bug crítico identificado no audit).
+> **v1.1** — `1.500` corrigido de silencioso para rejeitado explicitamente.
+> **v1.2** — formato BR completo (`1.250,50`) aceito.
 
 **Aceitos:**
 
@@ -263,31 +264,25 @@ Telegram message
 | `250` | `Decimal("250")` |
 | `250.00` | `Decimal("250.00")` |
 | `250,00` | `Decimal("250.00")` |
+| `1.500,00` | `Decimal("1500.00")` — BR milhar+decimal |
+| `1.234,56` | `Decimal("1234.56")` — BR milhar+decimal |
 
-**Rejeitados como ambíguos** (separador único + 3 dígitos = padrão de milhar):
+**Rejeitados:**
 
-| Entrada | Motivo                                           |
-| ------- | ------------------------------------------------ |
-| `1.500` | Poderia ser 1,5 (decimal US) ou 1500 (milhar BR) |
-| `1,500` | Poderia ser 1,5 (decimal BR) ou 1500 (milhar US) |
+- `1.500` — separador único com 3 dígitos: ambíguo (decimal US ou milhar BR?)
+- `1,500` — separador único com 3 dígitos: ambíguo (decimal BR ou milhar US?)
+- `1,250.50` — comma antes de ponto: formato US não suportado
 
-**Não suportados em v1.1** (ambos os separadores):
-
-| Entrada    | Motivo                                |
-| ---------- | ------------------------------------- |
-| `1.500,00` | Formato milhar brasileiro com decimal |
-| `1.234,56` | Idem                                  |
-
-**Mensagem padrão para ambíguos e não suportados:**
+**Mensagem para ambíguos:**
 
 ```
 ❌ Valor ambíguo. Use 1500, 1500.00 ou 1500,00.
 ```
 
-**Lógica de detecção em `parse_amount`:**
+**Lógica de detecção em `parse_amount` (v1.2):**
 
-1. Se contém `.` **e** `,` → ambos os separadores → rejeita
-2. Se contém apenas `.` ou apenas `,` e o sufixo tem exatamente 3 dígitos → padrão de milhar → rejeita
+1. Se contém `.` **e** `,`: valida contra `^\d{1,3}(\.\d{3})*,\d{1,2}$` → aceita como BR ou rejeita
+2. Se contém apenas `.` ou `,` e sufixo tem exatamente 3 dígitos → ambíguo → rejeita
 3. Normaliza `,` → `.` e interpreta como `Decimal`
 
 ### Regras de parsing por comando
@@ -391,7 +386,44 @@ XP — R$ 1.850,00
 | Integração E2E | Expense → summary, income → summary, balance → conferência |
 | `format_summary` standalone | Exercício direto com `MonthlySummaryResponse` real |
 
-### Limitações v1.1
+### Menu Telegram (v1.2)
+
+Menu principal inclui o módulo Finance como primeiro item:
+
+```text
+🏠 Atlas
+[💰 Finanças]
+[📥 Inbox] [📅 Agenda]
+[📰 Noticias] [📑 Briefing]
+[⏳ Pendencias]
+```
+
+Submenu Finance acessível via botão "💰 Finanças":
+
+```text
+💰 Finanças
+[📊 Resumo do mês]
+[➕ Como lançar despesa]
+[➕ Como lançar receita]
+[🏦 Como atualizar saldo]
+[⬅️ Voltar]
+```
+
+**Callback data** (prefixos curtos, ≤ 64 bytes):
+
+| Callback | Ação |
+|---|---|
+| `fin:menu` | Abre submenu Finance |
+| `fin:sum` | Executa `/finance` (mês atual) |
+| `fin:help_exp` | Mostra instruções do `/expense` |
+| `fin:help_inc` | Mostra instruções do `/income` |
+| `fin:help_bal` | Mostra instruções do `/balance` |
+| `fin:back` | Volta ao menu principal |
+| `main:menu` | Volta ao menu principal |
+
+Callbacks `fin:menu`, `fin:help_*`, `fin:back`, `main:menu` são interceptados no webhook antes do orchestrator. `fin:sum` é traduzido para `/finance` pelo `_translate_callback()`.
+
+### Limitações v1.2
 
 Comportamentos deliberadamente fora do escopo desta versão:
 
@@ -416,7 +448,6 @@ Funcionalidades identificadas para iteração futura:
 - Edição e deleção de lançamentos via Telegram
 - NLP para entrada em linguagem natural ("gastei 250 no mercado")
 - Inline keyboards para confirmação antes de registrar
-- Suporte a separador de milhar brasileiro (`1.234,56`)
 
 ---
 
@@ -451,6 +482,25 @@ Funcionalidades identificadas para iteração futura:
 | Regressão | ✅ ZERO | Nenhum teste pré-existente quebrado |
 
 **Conclusão v1.1:** módulo íntegro. Bug crítico de parsing corrigido e validado. Encerrado nesta fase.
+
+### Finance + Telegram v1.2 (Abril 2026)
+
+| Item | Resultado | Detalhe |
+| --- | --- | --- |
+| Formato BR `1.250,50` | ✅ OK | Regex `^\d{1,3}(\.\d{3})*,\d{1,2}$` detecta e normaliza corretamente |
+| Ambiguidade `1.500` rejeitada | ✅ OK | Um separador com 3 dígitos após → erro explícito |
+| month_ref mês 00/13 rejeitado | ✅ OK | Regex `0[1-9]\|1[0-2]` em `telegram.py`, `service.py` e `schemas.py` |
+| amount ≤ 0 rejeitado | ✅ OK | Validator Pydantic em `FinancialEntryCreate` + parser |
+| Saldos negativos permitidos | ✅ OK | `parse_balance_args` aceita valores negativos via `parse_amount` sign-agnostic |
+| Log sanitization | ✅ OK | `balance` e `conference_diff` removidos do log de `get_monthly_summary` |
+| Menu principal com Finance | ✅ OK | Botão "💰 Finanças" como primeiro item no `build_main_menu()` |
+| Submenu Finance | ✅ OK | `build_finance_menu()` com 5 botões; callback `fin:menu` abre o submenu |
+| Interceptação fin:* no webhook | ✅ OK | Callbacks `fin:*` (exceto `fin:sum`) resolvidos sem passar pelo orchestrator |
+| Autorização fin:* | ✅ OK | Verificação `is_authorized()` cobre todos os callbacks automaticamente |
+| Cobertura de testes | ✅ OK | 71 testes Telegram; 282 total; cobertura v1.2 adicionada |
+| Regressão | ✅ ZERO | Nenhum teste pré-existente quebrado |
+
+**Conclusão v1.2:** hardening completo de validações, parsing de moeda BR, segurança de logs, e UX Telegram com menus interativos. Encerrado nesta fase.
 
 ---
 

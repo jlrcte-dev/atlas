@@ -380,6 +380,7 @@ def _translate_callback(data: str) -> str:
 
     Patterns:
       cmd:/inbox   → /inbox
+      fin:sum      → /finance
       apprv:42     → /approve 42
       rejct:42     → /reject 42
       approve:42   → /approve 42  (legacy compat)
@@ -387,6 +388,8 @@ def _translate_callback(data: str) -> str:
     """
     if data.startswith("cmd:"):
         return data[4:]
+    if data == "fin:sum":
+        return "/finance"
     if data.startswith("apprv:"):
         return f"/approve {data[6:]}"
     if data.startswith("rejct:"):
@@ -397,6 +400,35 @@ def _translate_callback(data: str) -> str:
         if prefix in ("approve", "reject"):
             return f"/{prefix} {tail}"
     return data
+
+
+def _handle_finance_callback(bot: TelegramBot, chat_id: str, data: str) -> None:
+    """Handle Finance module menu callbacks (no orchestrator, no DB needed)."""
+    if data == "fin:menu":
+        bot.send_message(chat_id, "💰 Finanças", reply_markup=bot.build_finance_menu())
+    elif data == "fin:help_exp":
+        bot.send_message(
+            chat_id,
+            "➕ <b>Lançar despesa:</b>\n"
+            "<code>/expense 250.00 Mercado</code>\n"
+            "<code>/expense 1500 Aluguel</code>",
+        )
+    elif data == "fin:help_inc":
+        bot.send_message(
+            chat_id,
+            "➕ <b>Lançar receita:</b>\n"
+            "<code>/income 5000.00 Salário</code>\n"
+            "<code>/income 1200 Freelance</code>",
+        )
+    elif data == "fin:help_bal":
+        bot.send_message(
+            chat_id,
+            "🏦 <b>Atualizar saldo da conta:</b>\n"
+            "<code>/balance Nubank 1500.00</code>\n"
+            "<code>/balance XP Investimentos 3500.00</code>",
+        )
+    elif data in ("fin:back", "main:menu"):
+        bot.send_message(chat_id, "🏠 Atlas", reply_markup=bot.build_main_menu())
 
 
 def _send_pending_list(bot: TelegramBot, db: Session, chat_id: str) -> None:
@@ -436,6 +468,14 @@ async def telegram_webhook(
     # Answer callback immediately — removes the loading spinner on the button
     if parsed["type"] == "callback" and parsed.get("callback_query_id"):
         bot.answer_callback_query(parsed["callback_query_id"])
+
+    # Finance menu callbacks: intercepted here, never reach the orchestrator
+    raw_cb = parsed.get("text", "")
+    if parsed["type"] == "callback" and (
+        (raw_cb.startswith("fin:") and raw_cb != "fin:sum") or raw_cb == "main:menu"
+    ):
+        _handle_finance_callback(bot, parsed["chat_id"], raw_cb)
+        return {"ok": True}
 
     # Resolve final command (callback_data or raw text)
     command = (

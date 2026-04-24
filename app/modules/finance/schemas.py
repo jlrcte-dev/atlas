@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-_MONTH_REF_RE = re.compile(r"^\d{4}-\d{2}$")
+_MONTH_REF_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 def _check_month_ref(v: str) -> str:
@@ -90,6 +90,13 @@ class FinancialEntryCreate(BaseModel):
     settlement_date: str | None = None
     is_investment: bool = False
     notes: str | None = None
+
+    @field_validator("amount")
+    @classmethod
+    def validate_amount(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("amount deve ser maior que zero")
+        return v
 
     @field_validator("month_ref")
     @classmethod
