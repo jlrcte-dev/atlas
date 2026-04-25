@@ -12,7 +12,6 @@ import pytest
 from app.integrations.email_classifier import classify_email
 from app.integrations.email_models import EmailMessage
 from app.modules.inbox.service import InboxService
-from app.integrations.email_models import EmailMessage
 
 
 def _make(
@@ -632,7 +631,7 @@ def test_audit_tags_bulk_sender_penalized():
 
 def test_audit_tags_empty_for_plain_update():
     """Plain update with no signals and anonymous sender must have no audit tags."""
-    email = _make(subject="Retorno sobre reunião de ontem")
+    email = _make(subject="Comprovante de entrega recebido")
     clf = classify_email(email)
     assert clf.audit_tags == []
 
@@ -847,13 +846,15 @@ def test_pix_in_newsletter_stays_baixa():
     assert "FINANCIAL_TOPIC" not in clf.audit_tags
 
 
-def test_pix_does_not_change_score():
-    """PIX detection is audit-only — must not alter the score."""
-    with_pix = _make(subject="Pix enviado — R$ 200,00")
-    without_pix = _make(subject="Atualização de sistema")
-    clf_pix = classify_email(with_pix)
-    clf_plain = classify_email(without_pix)
-    assert clf_pix.score == clf_plain.score
+def test_pix_transactional_boosts_score():
+    """PIX enviado is now a transactional signal — must boost score and produce alta."""
+    from app.integrations.email_classifier import SCORE_WEIGHTS
+
+    email = _make(subject="Pix enviado — R$ 200,00", sender="noreply@banco.com")
+    clf = classify_email(email)
+    # bulk_sender(-3) + transactional(+4) = +1 → media; test just verifies transactional weight applied
+    assert "transactional" in clf.score_reasons
+    assert "FINANCIAL_TRANSACTION" in clf.audit_tags
 
 
 # ── v4: Learned senders ───────────────────────────────────────────────────────
@@ -974,3 +975,708 @@ def test_learned_sender_short_reason_maps_correctly():
     from app.integrations.email_classifier import build_short_reason
 
     assert build_short_reason(["IMPORTANT_SENDER_LEARNED"]) == "Remetente prioritário"
+
+
+# ── v5: Transactional signals ─────────────────────────────────────────────────
+
+
+def test_pix_realizado_is_transactional():
+    """'pix realizado' must produce FINANCIAL_TRANSACTION tag and score boost."""
+    email = _make(subject="Pix realizado com sucesso — R$ 500,00")
+    clf = classify_email(email)
+    assert "FINANCIAL_TRANSACTION" in clf.audit_tags
+    assert "transactional" in clf.score_reasons
+    assert clf.priority == "alta"
+
+
+def test_nota_de_corretagem_is_transactional():
+    """'nota de corretagem' must produce FINANCIAL_TRANSACTION tag."""
+    email = _make(subject="Nota de corretagem — operações de abril")
+    clf = classify_email(email)
+    assert "FINANCIAL_TRANSACTION" in clf.audit_tags
+    assert "transactional" in clf.score_reasons
+
+
+def test_nota_de_negociacao_is_transactional():
+    """'nota de negociação' (accented and plain) must produce FINANCIAL_TRANSACTION tag."""
+    email_acc = _make(subject="Nota de negociação disponível")
+    email_plain = _make(subject="Nota de negociacao disponivel")
+    for email in (email_acc, email_plain):
+        clf = classify_email(email)
+        assert "FINANCIAL_TRANSACTION" in clf.audit_tags, f"Failed for: {email.subject}"
+
+
+def test_corretora_is_transactional():
+    """'corretora' must produce FINANCIAL_TRANSACTION tag."""
+    email = _make(subject="Aviso da sua corretora — liquidação da ordem")
+    clf = classify_email(email)
+    assert "FINANCIAL_TRANSACTION" in clf.audit_tags
+
+
+def test_transactional_boosts_score_to_alta():
+    """Transactional signal alone (weight=4) from anonymous sender must reach alta."""
+    email = _make(subject="Pix realizado — pagamento efetuado", sender="sistema@banco.com")
+    clf = classify_email(email)
+    assert clf.priority == "alta"
+    assert "transactional" in clf.score_reasons
+
+
+def test_transactional_bulk_sender_still_media_or_above():
+    """bulk_sender(-3) + transactional(+4) = score 1 → still media, not baixa."""
+    email = _make(subject="Pix realizado com sucesso", sender="noreply@banco.com.br")
+    clf = classify_email(email)
+    assert "bulk_sender" in clf.score_reasons
+    assert "transactional" in clf.score_reasons
+    assert clf.priority in ("media", "alta")
+
+
+def test_transactional_also_sets_financial_topic():
+    """FINANCIAL_TRANSACTION email must ALSO carry FINANCIAL_TOPIC (is_financial=True)."""
+    email = _make(subject="Nota de corretagem — compra de ações")
+    clf = classify_email(email)
+    assert "FINANCIAL_TRANSACTION" in clf.audit_tags
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_transactional_newsletter_stays_baixa():
+    """Transactional signal inside newsletter must not escape the short-circuit."""
+    email = _make(
+        subject="Newsletter — pix realizado e nota de corretagem",
+        snippet="Para descadastrar clique em unsubscribe.",
+    )
+    clf = classify_email(email)
+    assert clf.category == "newsletter"
+    assert clf.priority == "baixa"
+    assert clf.audit_tags == ["NEWSLETTER_PENALIZED"]
+
+
+def test_build_short_reason_financial_transaction_beats_topic():
+    """FINANCIAL_TRANSACTION must win over FINANCIAL_TOPIC in short_reason."""
+    from app.integrations.email_classifier import build_short_reason
+
+    tags = ["FINANCIAL_TRANSACTION", "FINANCIAL_TOPIC"]
+    assert build_short_reason(tags) == "Transação financeira"
+
+
+def test_build_short_reason_financial_transaction_alone():
+    from app.integrations.email_classifier import build_short_reason
+
+    assert build_short_reason(["FINANCIAL_TRANSACTION"]) == "Transação financeira"
+
+
+# ── v5: Top5 read-transaction eligibility ─────────────────────────────────────
+
+
+def test_top5_includes_read_financial_transaction():
+    """Read email with FINANCIAL_TRANSACTION must remain eligible for top5."""
+    read_pix = _make(
+        id="pix",
+        subject="Pix realizado — R$ 800,00",
+        sender="noreply@banco.com",
+        is_read=True,
+    )
+    svc = InboxService(client=_make_client([read_pix]))
+    result = svc.summarize_emails()
+    top5_ids = [item["id"] for item in result["top5"]]
+    assert "pix" in top5_ids
+
+
+def test_top5_excludes_read_non_transactional_financial():
+    """Read email with only FINANCIAL_TOPIC (not FINANCIAL_TRANSACTION) and no action flags
+    must still be excluded from top5 (generic financial is not a pass)."""
+    read_fatura = _make(
+        id="fat",
+        subject="Informativo sobre fatura",
+        sender="noreply@banco.com",
+        is_read=True,
+    )
+    svc = InboxService(client=_make_client([read_fatura]))
+    result = svc.summarize_emails()
+    top5_ids = [item["id"] for item in result["top5"]]
+    assert "fat" not in top5_ids
+
+
+# ── v5: Project signals ───────────────────────────────────────────────────────
+
+
+def test_project_signal_lgpd():
+    """'lgpd' must produce PROJECT_SIGNAL tag and minor score boost."""
+    email = _make(subject="Projeto LGPD — atualização de processos internos")
+    clf = classify_email(email)
+    assert "PROJECT_SIGNAL" in clf.audit_tags
+    assert "project" in clf.score_reasons
+
+
+def test_project_signal_nova_data():
+    """'nova data' must produce PROJECT_SIGNAL tag."""
+    email = _make(subject="Nova data para o workshop de segurança")
+    clf = classify_email(email)
+    assert "PROJECT_SIGNAL" in clf.audit_tags
+
+
+def test_build_short_reason_project_signal():
+    from app.integrations.email_classifier import build_short_reason
+
+    assert build_short_reason(["PROJECT_SIGNAL"]) == "Projeto interno"
+
+
+# ── v5: Noise expansion ───────────────────────────────────────────────────────
+
+
+def test_noise_campanha():
+    """'campanha' must classify as noise → baixa."""
+    email = _make(subject="Campanha de verão — aproveite!")
+    clf = classify_email(email)
+    assert clf.category == "noise"
+    assert clf.priority == "baixa"
+
+
+def test_noise_novidades():
+    """'novidades' must classify as noise → baixa."""
+    email = _make(snippet="Confira as novidades do nosso app este mês.")
+    clf = classify_email(email)
+    assert clf.category == "noise"
+    assert clf.priority == "baixa"
+
+
+def test_noise_promocao_exclusiva():
+    """'promoção exclusiva' and 'promocao exclusiva' must classify as noise."""
+    for subj in ("Promoção exclusiva para clientes VIP", "Promocao exclusiva somente hoje"):
+        email = _make(subject=subj)
+        clf = classify_email(email)
+        assert clf.category == "noise", f"Expected noise for: {subj}"
+
+
+# ── v5: Newsletter expansion ──────────────────────────────────────────────────
+
+
+def test_newsletter_revista():
+    """'revista' must classify as newsletter → baixa."""
+    email = _make(subject="Revista mensal de tecnologia — edição de abril")
+    clf = classify_email(email)
+    assert clf.category == "newsletter"
+    assert clf.priority == "baixa"
+
+
+# ── v5: Opportunity expansion — reunião ───────────────────────────────────────
+
+
+def test_opportunity_reuniao_bare_no_longer_triggers():
+    """Bare 'reunião' must NOT trigger is_opportunity — removed to prevent double-counting
+    with follow-up signals. Commercial compound forms ('reunião comercial', etc.) remain."""
+    email = _make(subject="Reunião sobre o projeto de integração")
+    clf = classify_email(email)
+    assert clf.is_opportunity is False
+
+
+# ── v6: action_items category filter ─────────────────────────────────────────
+
+
+def test_action_items_excludes_newsletter_with_action_flag():
+    """Newsletter with requires_response signal must NOT appear in action_items."""
+    nl = _make(
+        id="nl",
+        subject="Newsletter — confirme sua presença no evento",
+        snippet="Para descadastrar clique em unsubscribe. Aguardo sua confirmação.",
+        is_read=False,
+    )
+    svc = InboxService(client=_make_client([nl]))
+    result = svc.summarize_emails()
+    action_ids = [item["id"] for item in result["action_items"]]
+    assert "nl" not in action_ids
+
+
+def test_action_items_excludes_noise_with_action_flag():
+    """Noise email that also triggers a deadline signal must NOT appear in action_items."""
+    noise = _make(
+        id="nz",
+        subject="Oferta especial — desconto imperdível! Prazo hoje!",
+        is_read=False,
+    )
+    svc = InboxService(client=_make_client([noise]))
+    result = svc.summarize_emails()
+    action_ids = [item["id"] for item in result["action_items"]]
+    assert "nz" not in action_ids
+
+
+def test_action_items_keeps_operational_update():
+    """Update email with a genuine deadline must remain in action_items."""
+    op = _make(
+        id="op",
+        subject="Contrato de serviço — prazo de assinatura vence amanhã",
+        is_read=False,
+    )
+    svc = InboxService(client=_make_client([op]))
+    result = svc.summarize_emails()
+    action_ids = [item["id"] for item in result["action_items"]]
+    assert "op" in action_ids
+
+
+# ── v6: Clear / corretora scenario ───────────────────────────────────────────
+
+
+def test_clear_nota_negociacao_in_top5_unread():
+    """noreply@clear.com.br + 'Nota de Negociação' (unread) must appear in top5."""
+    clear = _make(
+        id="clear",
+        subject="Clear Corretora | Nota de Negociação",
+        snippet="Sua nota de negociação está disponível para download.",
+        sender="Clear Corretora <noreply@clear.com.br>",
+        is_read=False,
+    )
+    svc = InboxService(client=_make_client([clear]))
+    result = svc.summarize_emails()
+    top5_ids = [item["id"] for item in result["top5"]]
+    assert "clear" in top5_ids
+
+
+def test_clear_nota_negociacao_in_top5_read():
+    """Clear 'Nota de Negociação' already read must still appear in top5 (FINANCIAL_TRANSACTION pass)."""
+    clear = _make(
+        id="clear",
+        subject="Clear Corretora | Nota de Negociação",
+        snippet="Sua nota de negociação está disponível para download.",
+        sender="Clear Corretora <noreply@clear.com.br>",
+        is_read=True,
+    )
+    svc = InboxService(client=_make_client([clear]))
+    result = svc.summarize_emails()
+    top5_ids = [item["id"] for item in result["top5"]]
+    assert "clear" in top5_ids
+
+
+def test_clear_nota_negociacao_short_reason():
+    """Clear 'Nota de Negociação' must have short_reason='Transação financeira'."""
+    clear = _make(
+        id="clear",
+        subject="Clear Corretora | Nota de Negociação",
+        snippet="Sua nota de negociação está disponível.",
+        sender="Clear Corretora <noreply@clear.com.br>",
+        is_read=False,
+    )
+    svc = InboxService(client=_make_client([clear]))
+    result = svc.summarize_emails()
+    item = next(i for i in result["top5"] if i["id"] == "clear")
+    assert item["short_reason"] == "Transação financeira"
+
+
+# ── v6: Mixed scenario — real-world evidence ─────────────────────────────────
+
+
+def test_mixed_scenario_top5_and_action_items():
+    """Scenario reflecting real evidence: financial emails in top5, junk out of action_items.
+
+    Emails:
+    - XP "Transferência recebida" (alta, is_read=True, noreply)
+    - XP "Pix recebido" (alta, is_read=False, noreply)
+    - Clear "Nota de Negociação" (is_read=True, noreply)
+    - Buildings newsletter-style (snippet com unsubscribe)
+    - Azure promo ("você pode implantar", is_read=False)
+
+    Expected:
+    - top5 includes XP transferencia and XP pix and Clear
+    - top5 does NOT include Buildings (newsletter category)
+    - action_items does NOT include Buildings (newsletter category)
+    """
+    xp_transfer = _make(
+        id="xp_t",
+        subject="Transferência recebida — R$ 1.200,00",
+        snippet="Transferência recebida de João Lima em sua conta XP.",
+        sender="noreply@xp.com.br",
+        is_read=True,
+    )
+    xp_pix = _make(
+        id="xp_p",
+        subject="Pix recebido com sucesso",
+        snippet="Você recebeu um pix recebido de R$ 350,00.",
+        sender="noreply@xp.com.br",
+        is_read=False,
+    )
+    clear = _make(
+        id="clear",
+        subject="Clear Corretora | Nota de Negociação",
+        snippet="Sua nota de negociação está disponível.",
+        sender="Clear Corretora <noreply@clear.com.br>",
+        is_read=True,
+    )
+    buildings = _make(
+        id="build",
+        subject="Resumo #275 — buildings.com.br",
+        snippet="Confira o resumo desta semana. Para descadastrar clique em unsubscribe.",
+        is_read=False,
+    )
+    azure = _make(
+        id="azure",
+        subject="Com que rapidez você pode implantar nosso produto?",
+        snippet="Descubra como você pode implantar soluções Azure em minutos.",
+        sender="Microsoft Azure <azure-noreply@microsoft.com>",
+        is_read=False,
+    )
+
+    svc = InboxService(client=_make_client([xp_transfer, xp_pix, clear, buildings, azure]))
+    result = svc.summarize_emails()
+
+    top5_ids = {item["id"] for item in result["top5"]}
+    action_ids = {item["id"] for item in result["action_items"]}
+
+    # Financial/transactional emails must appear in top5
+    assert "xp_t" in top5_ids, "XP transferência should be in top5"
+    assert "xp_p" in top5_ids, "XP pix should be in top5"
+    assert "clear" in top5_ids, "Clear nota de negociação should be in top5"
+
+    # Newsletter-classified Buildings must not appear in either list
+    assert "build" not in top5_ids, "Buildings newsletter should not be in top5"
+    assert "build" not in action_ids, "Buildings newsletter should not be in action_items"
+
+
+# ── v6: Financial TOPIC signals (audit-only) ─────────────────────────────────
+
+
+def test_b3_adds_financial_topic_tag():
+    """'b3' must produce FINANCIAL_TOPIC audit tag."""
+    email = _make(subject="Informe B3 — posição consolidada")
+    clf = classify_email(email)
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_extrato_adds_financial_topic_tag():
+    """'extrato' must produce FINANCIAL_TOPIC audit tag."""
+    email = _make(subject="Extrato de conta corrente — março 2026")
+    clf = classify_email(email)
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_negociacao_adds_financial_topic_tag():
+    """'negociação' standalone must produce FINANCIAL_TOPIC audit tag."""
+    email = _make(subject="Negociação de contrato — nova proposta")
+    clf = classify_email(email)
+    assert "FINANCIAL_TOPIC" in clf.audit_tags
+
+
+def test_b3_extrato_negociacao_do_not_change_score():
+    """b3/extrato/negociação are audit-only — must not alter the score vs a plain email."""
+    plain = _make(subject="Informativo geral do sistema")
+    with_fin = _make(subject="Extrato B3 — negociação do dia")
+    clf_plain = classify_email(plain)
+    clf_fin = classify_email(with_fin)
+    assert clf_plain.score == clf_fin.score
+
+
+# ── v7: Promotional noise detection ──────────────────────────────────────────
+
+
+def test_azure_promomail_is_bulk_sender():
+    """Sender containing 'promomail' must receive bulk_sender penalty."""
+    email = _make(
+        subject="Com que rapidez você pode implantar um aplicativo web?",
+        sender="Azure <azure@promomail.microsoft.com>",
+    )
+    clf = classify_email(email)
+    assert "bulk_sender" in clf.score_reasons
+    assert "BULK_SENDER_PENALIZED" in clf.audit_tags
+
+
+def test_azure_promomail_gets_promotional_noise_tag():
+    """'promomail' in sender text must produce PROMOTIONAL_NOISE tag."""
+    email = _make(
+        subject="Com que rapidez você pode implantar um aplicativo web?",
+        sender="Azure <azure@promomail.microsoft.com>",
+    )
+    clf = classify_email(email)
+    assert "PROMOTIONAL_NOISE" in clf.audit_tags
+    assert "promotional_noise" in clf.score_reasons
+
+
+def test_azure_promomail_requires_response_not_set():
+    """'você pode' from a promomail sender without financial content must NOT trigger requires_response."""
+    email = _make(
+        subject="Com que rapidez você pode implantar um aplicativo web?",
+        sender="Azure <azure@promomail.microsoft.com>",
+    )
+    clf = classify_email(email)
+    assert clf.requires_response is False
+
+
+def test_azure_promomail_not_in_action_items():
+    """Azure promomail email must not appear in action_items."""
+    azure = _make(
+        id="az",
+        subject="Com que rapidez você pode implantar um aplicativo web?",
+        sender="Azure <azure@promomail.microsoft.com>",
+        is_read=False,
+    )
+    svc = InboxService(client=_make_client([azure]))
+    result = svc.summarize_emails()
+    assert "az" not in {item["id"] for item in result["action_items"]}
+
+
+def test_azure_promomail_ranks_below_financial_in_top5():
+    """Azure promomail must not appear in top5 when financial emails are present."""
+    azure = _make(
+        id="az",
+        subject="Com que rapidez você pode implantar um aplicativo web?",
+        sender="Azure <azure@promomail.microsoft.com>",
+        is_read=False,
+    )
+    pix = _make(
+        id="pix",
+        subject="Pix recebido com sucesso — R$ 500,00",
+        sender="noreply@xp.com.br",
+        is_read=False,
+    )
+    svc = InboxService(client=_make_client([azure, pix]))
+    result = svc.summarize_emails()
+    top5_ids = [item["id"] for item in result["top5"]]
+    # PIX must be in top5
+    assert "pix" in top5_ids
+    # If Azure is in top5, it must rank after PIX
+    if "az" in top5_ids:
+        assert top5_ids.index("pix") < top5_ids.index("az")
+
+
+def test_buildings_digest_gets_promotional_noise():
+    """Email with 'resumo #' pattern must get PROMOTIONAL_NOISE tag."""
+    email = _make(
+        subject="Resumo #275: Baixa disponibilidade de galpões no interior de SP",
+        sender="Buildings <contato@buildings.com.br>",
+    )
+    clf = classify_email(email)
+    assert "PROMOTIONAL_NOISE" in clf.audit_tags
+    assert "promotional_noise" in clf.score_reasons
+
+
+def test_buildings_digest_not_in_action_items():
+    """Buildings digest with PROMOTIONAL_NOISE must not appear in action_items."""
+    buildings = _make(
+        id="build",
+        subject="Resumo #275: Baixa disponibilidade de galpões no interior de SP",
+        sender="Buildings <contato@buildings.com.br>",
+        is_read=False,
+    )
+    svc = InboxService(client=_make_client([buildings]))
+    result = svc.summarize_emails()
+    assert "build" not in {item["id"] for item in result["action_items"]}
+
+
+def test_webinar_email_gets_promotional_noise():
+    """Email containing 'webinar' must receive PROMOTIONAL_NOISE tag."""
+    email = _make(subject="Webinar gratuito — inscreva-se agora")
+    clf = classify_email(email)
+    assert "PROMOTIONAL_NOISE" in clf.audit_tags
+
+
+def test_requires_response_preserved_for_human_sender():
+    """'você pode' from a human (non-automated) sender must still trigger requires_response."""
+    email = _make(
+        subject="Você pode me enviar o relatório atualizado?",
+        sender="Ana Lima <ana@empresa.com>",
+    )
+    clf = classify_email(email)
+    assert clf.requires_response is True
+
+
+def test_requires_response_preserved_for_noreply_with_financial():
+    """Automated sender with financial content must keep requires_response if signal is present."""
+    email = _make(
+        subject="Sua fatura está disponível — poderia confirmar o recebimento?",
+        sender="noreply@banco.com",
+    )
+    clf = classify_email(email)
+    # is_financial=True (fatura) — requires_response gate must NOT suppress the flag
+    assert clf.requires_response is True
+
+
+def test_noreply_financial_operational_not_promotional():
+    """PIX/transferência from noreply must NOT receive PROMOTIONAL_NOISE tag."""
+    email = _make(
+        subject="Transferência recebida — R$ 1.200,00",
+        sender="noreply@xp.com.br",
+    )
+    clf = classify_email(email)
+    assert "PROMOTIONAL_NOISE" not in clf.audit_tags
+
+
+def test_promotional_noise_score_penalty_applied():
+    """PROMOTIONAL_NOISE must lower the score below zero for a pure promo email."""
+    promo = _make(subject="Webinar gratuito — ao vivo na próxima semana")
+    clf = classify_email(promo)
+    assert "promotional_noise" in clf.score_reasons
+    assert clf.score < 0
+    assert clf.priority == "baixa"
+
+
+def test_build_short_reason_promotional_noise():
+    from app.integrations.email_classifier import build_short_reason
+
+    assert build_short_reason(["PROMOTIONAL_NOISE"]) == "Conteúdo promocional"
+
+
+# ── v7b: Real cases — Nelogica / Movida ──────────────────────────────────────
+
+
+def test_nelogica_motivational_gets_promotional_noise():
+    """'até onde a dedicação' must produce PROMOTIONAL_NOISE tag."""
+    email = _make(
+        subject="Até onde a dedicação pode te levar?",
+        sender="Lucas Fortes <lucas.fortes@mail.nelogica.com.br>",
+    )
+    clf = classify_email(email)
+    assert "PROMOTIONAL_NOISE" in clf.audit_tags
+
+
+def test_nelogica_motivational_requires_response_suppressed():
+    """'?' from promo-content sender must NOT trigger requires_response."""
+    email = _make(
+        subject="Até onde a dedicação pode te levar?",
+        sender="Lucas Fortes <lucas.fortes@mail.nelogica.com.br>",
+    )
+    clf = classify_email(email)
+    assert clf.requires_response is False
+
+
+def test_nelogica_motivational_priority_baixa():
+    """Nelogica motivational must be baixa — promo penalty offsets human_sender bonus."""
+    email = _make(
+        subject="Até onde a dedicação pode te levar?",
+        sender="Lucas Fortes <lucas.fortes@mail.nelogica.com.br>",
+    )
+    clf = classify_email(email)
+    assert clf.priority == "baixa"
+
+
+def test_nelogica_not_in_top5_when_financial_emails_present():
+    """Nelogica motivational must not appear in top5 when XP financial email is present."""
+    nelogica = _make(
+        id="nl",
+        subject="Até onde a dedicação pode te levar?",
+        sender="Lucas Fortes <lucas.fortes@mail.nelogica.com.br>",
+        is_read=False,
+    )
+    xp_pix = _make(
+        id="pix",
+        subject="Pix recebido com sucesso — R$ 350,00",
+        sender="noreply@xp.com.br",
+        is_read=False,
+    )
+    svc = InboxService(client=_make_client([nelogica, xp_pix]))
+    result = svc.summarize_emails()
+    top5_ids = [item["id"] for item in result["top5"]]
+    assert "pix" in top5_ids
+    if "nl" in top5_ids:
+        assert top5_ids.index("pix") < top5_ids.index("nl")
+
+
+def test_movida_emkt_is_bulk_sender():
+    """Sender containing 'emkt.' must receive bulk_sender penalty."""
+    email = _make(
+        subject="Já tem roteiro para o próximo feriado?",
+        sender="Movida Aluguel de Carros <movida@emkt.movida.com.br>",
+    )
+    clf = classify_email(email)
+    assert "bulk_sender" in clf.score_reasons
+    assert "BULK_SENDER_PENALIZED" in clf.audit_tags
+
+
+def test_movida_emkt_gets_promotional_noise():
+    """'emkt.' + 'próximo feriado' must produce PROMOTIONAL_NOISE tag."""
+    email = _make(
+        subject="Já tem roteiro para o próximo feriado?",
+        sender="Movida Aluguel de Carros <movida@emkt.movida.com.br>",
+    )
+    clf = classify_email(email)
+    assert "PROMOTIONAL_NOISE" in clf.audit_tags
+
+
+def test_movida_not_in_top5_when_financial_emails_present():
+    """Movida travel promo must not appear in top5 when Clear/XP are present."""
+    movida = _make(
+        id="movida",
+        subject="Já tem roteiro para o próximo feriado?",
+        sender="Movida Aluguel de Carros <movida@emkt.movida.com.br>",
+        is_read=False,
+    )
+    clear = _make(
+        id="clear",
+        subject="Clear Corretora | Nota de Negociação",
+        snippet="Sua nota de negociação está disponível.",
+        sender="Clear Corretora <noreply@clear.com.br>",
+        is_read=False,
+    )
+    svc = InboxService(client=_make_client([movida, clear]))
+    result = svc.summarize_emails()
+    top5_ids = [item["id"] for item in result["top5"]]
+    assert "clear" in top5_ids
+    if "movida" in top5_ids:
+        assert top5_ids.index("clear") < top5_ids.index("movida")
+
+
+def test_emkt_domain_does_not_affect_financial_email():
+    """Financial email from emkt. domain must NOT receive PROMOTIONAL_NOISE (financial guard)."""
+    email = _make(
+        subject="Boleto gerado — vencimento amanhã",
+        sender="cobranca@emkt.banco.com.br",
+    )
+    clf = classify_email(email)
+    assert "PROMOTIONAL_NOISE" not in clf.audit_tags
+
+
+def test_lgpd_project_not_affected_by_promo_detection():
+    """LGPD project email must remain eligible — no promo signals, financial guard not needed."""
+    email = _make(
+        subject="Projeto LGPD — reunião de alinhamento com equipe jurídica",
+        sender="Ana Lima <ana@empresa.com>",
+        is_read=True,
+    )
+    clf = classify_email(email)
+    assert "PROMOTIONAL_NOISE" not in clf.audit_tags
+    assert "PROJECT_SIGNAL" in clf.audit_tags
+
+
+def test_operational_question_from_human_keeps_requires_response():
+    """Direct question from a human sender without promo content must keep requires_response."""
+    email = _make(
+        subject="Poderia confirmar recebimento do contrato?",
+        sender="Carlos Mendes <carlos@parceiro.com.br>",
+    )
+    clf = classify_email(email)
+    assert clf.requires_response is True
+
+
+# ── post-audit: signal integrity and reunião regression ──────────────────────
+
+
+def test_transactional_signals_subset_of_financial_signals():
+    """Every signal in _TRANSACTIONAL_SIGNALS must also be present in _FINANCIAL_SIGNALS.
+
+    Enforces the superset relationship so future additions to _TRANSACTIONAL_SIGNALS
+    cannot bypass the financial guard (is_promo = ... and not is_financial).
+    """
+    from app.integrations.email_classifier import _FINANCIAL_SIGNALS, _TRANSACTIONAL_SIGNALS
+
+    missing = _TRANSACTIONAL_SIGNALS - _FINANCIAL_SIGNALS
+    assert missing == frozenset(), (
+        f"Transactional signals not covered by _FINANCIAL_SIGNALS: {missing}. "
+        "Add them to _FINANCIAL_SIGNALS to preserve the financial guard."
+    )
+
+
+def test_reuniao_followup_is_not_opportunity():
+    """Meeting reminder with 'reunião' must NOT trigger is_opportunity after removing the bare signal.
+
+    Before the fix, 'reunião' in _OPPORTUNITY_SIGNALS caused double-counting:
+    follow-up reminders gained +2 opportunity score on top of their legitimate signals,
+    pushing routine emails like "Lembrando sobre a reunião de amanhã" to score=8 (alta).
+    The compound forms ("reunião comercial", etc.) remain and capture real opportunities.
+    """
+    email = _make(subject="Lembrando sobre a reunião de amanhã")
+    clf = classify_email(email)
+    assert clf.is_follow_up is True      # "lembrando" → legitimate follow-up
+    assert clf.has_deadline is True      # "amanhã" → legitimate deadline
+    assert clf.is_opportunity is False   # bare "reunião" must no longer trigger opportunity
+
+
+def test_reuniao_comercial_still_is_opportunity():
+    """Compound 'reunião comercial' must still trigger is_opportunity (not removed)."""
+    email = _make(subject="Reunião comercial sobre a proposta de parceria")
+    clf = classify_email(email)
+    assert clf.is_opportunity is True

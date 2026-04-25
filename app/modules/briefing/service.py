@@ -68,7 +68,7 @@ class BriefingService:
                 lines.append(f"  - {slot['start']}-{slot['end']} ({slot['duration_minutes']}min)")
 
         lines.append(f"\nINBOX — {inbox['summary']}")
-        for item in inbox.get("action_items", []):
+        for item in inbox.get("top5", []):
             lines.append(f"  * {item['sender']}: {item['subject']}")
 
         lines.append(f"\nNOTICIAS — {news['summary']}")

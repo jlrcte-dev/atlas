@@ -1,13 +1,15 @@
-"""Central email classifier — v4 with PIX signals and learned-sender support.
+"""Central email classifier — deterministic, no LLM.
 
 classify_email(email) -> EmailClassification
 
 Decision order (mandatory):
   1. Determine category (newsletter/noise short-circuit is absolute)
   2. If newsletter or noise: score=0, priority=baixa, flags=False, audit_tags=[NEWSLETTER_PENALIZED]
-  3. For action/update: compute v1 flags + financial signal + learned-sender check, then derive score
-  4. Derive priority from score via calibrated thresholds
-  5. Build audit_tags from all signals for auditability
+  3. Compute flags + financial/promo signals + learned-sender check
+  4. Gate requires_response for automated/promo senders without financial context
+  5. Derive contextual score from flags and sender heuristic
+  6. Derive priority from score via calibrated thresholds
+  7. Build audit_tags from all signals for auditability
 
 build_short_reason(audit_tags) -> str  (used by InboxService for Telegram output)
 
@@ -40,6 +42,9 @@ SCORE_WEIGHTS: dict[str, int] = {
     "human_sender": 2,        # named human contact (e.g. "Name <email>")
     "bulk_sender": -3,        # known bulk-mail sender (no-reply, mailer, etc.)
     "learned_sender": 2,      # sender explicitly listed in user_learning.json
+    "transactional": 4,       # confirmed financial transaction (PIX, nota de corretagem…)
+    "project": 1,             # internal project signal (LGPD, nova data…)
+    "promotional_noise": -4,  # detected promotional/marketing content
 }
 
 SCORE_THRESHOLD_HIGH: int = 4    # score >= 4 → "alta"
@@ -62,6 +67,7 @@ _NEWSLETTER_SIGNALS = frozenset({
     "edicao mensal",
     "informativo semanal",
     "informativo mensal",
+    "revista",
 })
 
 _NOISE_SIGNALS = frozenset({
@@ -76,6 +82,11 @@ _NOISE_SIGNALS = frozenset({
     "comentou sua publicacao",
     "nova mensagem no facebook",
     "nova mensagem no instagram",
+    "novidades",
+    "campanha",
+    "evento promocional",
+    "promoção exclusiva",
+    "promocao exclusiva",
 })
 
 _ACTION_VERBS = frozenset({
@@ -168,6 +179,34 @@ _OPPORTUNITY_SIGNALS = frozenset({
     "apresentacao comercial",
 })
 
+# Confirmed financial transactions — score +4, FINANCIAL_TRANSACTION tag
+_TRANSACTIONAL_SIGNALS = frozenset({
+    "pix realizado",
+    "pix enviado",
+    "pix recebido",
+    "transferência recebida",
+    "transferencia recebida",
+    "transferência enviada",
+    "transferencia enviada",
+    "comprovante pix",
+    "nota de corretagem",
+    "nota de negociação",
+    "nota de negociacao",
+    "corretora",
+    "liquidação",
+    "liquidacao",
+    "custódia",
+    "custodia",
+})
+
+# Internal project signals — score +1, PROJECT_SIGNAL tag
+_PROJECT_SIGNALS = frozenset({
+    "lgpd",
+    "lei geral de proteção de dados",
+    "lei geral de protecao de dados",
+    "nova data",
+})
+
 _RESPONSE_SIGNALS = frozenset({
     "?",
     "aguardo",
@@ -191,6 +230,54 @@ _BULK_SENDER_SIGNALS = frozenset({
     "mailer",
     "notifications",
     "bounce",
+    "promomail",   # Microsoft and others use promomail subdomain for marketing
+    "emkt.",       # email marketing subdomain (e.g. emkt.movida.com.br)
+    "mkt.",        # marketing subdomain (e.g. mkt.empresa.com.br)
+})
+
+# Promotional/marketing content signals — triggers PROMOTIONAL_NOISE tag and score penalty.
+# Intentionally narrow: only patterns that reliably indicate promotional content without
+# false-positiving on operational emails (boleto, fatura, nota de negociação, etc.).
+#
+# NOTE: "promomail", "emkt.", "mkt." also appear in _BULK_SENDER_SIGNALS — intentional.
+# _BULK_SENDER_SIGNALS applies the sender-origin penalty via _sender_score().
+# _PROMO_CONTENT_SIGNALS applies the promotional-noise penalty via is_promo detection
+# on the full text (sender + subject + snippet). The two penalties are cumulative and
+# correct: a confirmed marketing-subdomain sender is penalised on both axes.
+_PROMO_CONTENT_SIGNALS = frozenset({
+    # Sender subdomain patterns (caught via full text = sender + subject + snippet)
+    "promomail",               # Microsoft and others: azure@promomail.microsoft.com
+    "emkt.",                   # email marketing subdomain: movida@emkt.movida.com.br
+    "mkt.",                    # marketing subdomain: alguem@mkt.empresa.com.br
+    # Email marketing rendering headers
+    "visualizar este e-mail",
+    "visualizar como página",
+    "visualizar no navegador",
+    # Opt-out wording
+    "para não receber mais",
+    "não deseja mais receber",
+    "nao deseja mais receber",
+    # Live/event marketing
+    "webinar",
+    "evento gratuito",
+    "ao vivo",
+    # Digest newsletter with issue number (e.g. "Resumo #275")
+    "resumo #",
+    # Seasonal/travel marketing
+    "próximo feriado",
+    "proximo feriado",
+    "roteiro para",
+    "já tem roteiro",
+    "ja tem roteiro",
+    # Motivational/inspirational marketing (very specific phrases)
+    "até onde a dedicação",
+    "ate onde a dedicacao",
+    "quem se compromete",
+    # High-confidence urgency/FOMO marketing
+    "últimos dias",
+    "ultimos dias",
+    "imperdível",
+    "imperdivel",
 })
 
 # Financial/payment lexicon — adds FINANCIAL_TOPIC audit tag (no score impact)
@@ -217,6 +304,25 @@ _FINANCIAL_SIGNALS = frozenset({
     "transferência pix",
     "transferencia pix",
     "pagamento pix",
+    # Transactional signals also count as financial topic
+    "pix realizado",
+    "transferência recebida",
+    "transferencia recebida",
+    "transferência enviada",
+    "transferencia enviada",
+    "nota de corretagem",
+    "nota de negociação",
+    "nota de negociacao",
+    "corretora",
+    "liquidação",
+    "liquidacao",
+    "custódia",
+    "custodia",
+    # Broader financial context (audit-only, no score impact)
+    "negociação",
+    "negociacao",
+    "extrato",
+    "b3",
 })
 
 # ── Result type ────────────────────────────────────────────────────────────────
@@ -234,8 +340,9 @@ class EmailClassification:
     score: int = 0
     score_reasons: list[str] = field(default_factory=list)
     audit_tags: list[str] = field(default_factory=list)
-    # Auditable tags: HAS_DEADLINE | ACTION_REQUIRED | FINANCIAL_TOPIC | FOLLOW_UP_PENDING |
-    # OPPORTUNITY | IMPORTANT_SENDER | BULK_SENDER_PENALIZED | NEWSLETTER_PENALIZED
+    # Possible tags: HAS_DEADLINE | ACTION_REQUIRED | FINANCIAL_TRANSACTION | FINANCIAL_TOPIC |
+    # FOLLOW_UP_PENDING | OPPORTUNITY | PROJECT_SIGNAL | IMPORTANT_SENDER |
+    # IMPORTANT_SENDER_LEARNED | BULK_SENDER_PENALIZED | NEWSLETTER_PENALIZED | PROMOTIONAL_NOISE
 
 
 # ── Public helpers ─────────────────────────────────────────────────────────────
@@ -244,11 +351,14 @@ class EmailClassification:
 _TAG_TO_REASON: tuple[tuple[str, str], ...] = (
     ("HAS_DEADLINE", "Prazo ou data identificada"),
     ("ACTION_REQUIRED", "Requer resposta/ação"),
+    ("FINANCIAL_TRANSACTION", "Transação financeira"),
     ("FINANCIAL_TOPIC", "Assunto financeiro/pagamento"),
     ("FOLLOW_UP_PENDING", "Follow-up pendente"),
     ("IMPORTANT_SENDER_LEARNED", "Remetente prioritário"),
     ("IMPORTANT_SENDER", "Remetente prioritário"),
     ("OPPORTUNITY", "Proposta/oportunidade"),
+    ("PROJECT_SIGNAL", "Projeto interno"),
+    ("PROMOTIONAL_NOISE", "Conteúdo promocional"),
 )
 
 
@@ -288,15 +398,31 @@ def classify_email(email: EmailMessage) -> EmailClassification:
             audit_tags=["NEWSLETTER_PENALIZED"],
         )
 
-    # Step 3: v1 flags (reused as score inputs — no redundant text processing)
+    # Step 3: flags + financial/promo signals (no redundant text processing)
     requires_response = _has_signal(text, _RESPONSE_SIGNALS, "requires_response", reason_codes)
     has_deadline = _has_signal(text, _DEADLINE_SIGNALS, "has_deadline", reason_codes)
     is_follow_up = _has_signal(text, _FOLLOW_UP_SIGNALS, "is_follow_up", reason_codes)
     is_opportunity = _has_signal(text, _OPPORTUNITY_SIGNALS, "is_opportunity", reason_codes)
-    is_financial = any(sig in text for sig in _FINANCIAL_SIGNALS)
+    is_transactional = any(sig in text for sig in _TRANSACTIONAL_SIGNALS)
+    is_project = any(sig in text for sig in _PROJECT_SIGNALS)
+    is_financial = is_transactional or any(sig in text for sig in _FINANCIAL_SIGNALS)
+    # Financial guard: promo detection is suppressed when financial content is present.
+    # Ensures boleto/fatura/PIX emails from marketing-style domains are never penalised.
+    is_promo = any(sig in text for sig in _PROMO_CONTENT_SIGNALS) and not is_financial
+
+    # Step 4: gate requires_response for automated OR promo senders without financial context.
+    # Covers two patterns:
+    #   1. Automated sender (noreply, promomail, emkt.) + generic "você pode" → suppress
+    #   2. Promo content detected (motivational, seasonal) + any response signal → suppress
+    # Exception: financial content always allows requires_response (boleto, fatura, PIX…).
+    is_automated_sender = any(sig in email.sender.lower() for sig in _BULK_SENDER_SIGNALS)
+    if requires_response and (is_automated_sender or is_promo) and not is_financial:
+        requires_response = False
+        reason_codes = [c for c in reason_codes if c != "requires_response"]
+
     is_learned = _is_learned_sender(email.sender)
 
-    # Step 3: contextual score from v1 flags + sender heuristic + learned sender
+    # Step 5: contextual score from flags + sender heuristic + learned sender
     score, score_reasons = _score_email(
         requires_response=requires_response,
         has_deadline=has_deadline,
@@ -304,12 +430,15 @@ def classify_email(email: EmailMessage) -> EmailClassification:
         is_opportunity=is_opportunity,
         sender=email.sender,
         is_learned=is_learned,
+        is_transactional=is_transactional,
+        is_project=is_project,
+        is_promo=is_promo,
     )
 
-    # Step 4: priority from score (thresholds centralised above)
+    # Step 6: priority from score (thresholds centralised above)
     priority = _derive_priority_from_score(score)
 
-    # Step 5: build auditable tags from all computed signals
+    # Step 7: build auditable tags from all computed signals
     audit_tags = _build_audit_tags(
         requires_response=requires_response,
         has_deadline=has_deadline,
@@ -317,6 +446,9 @@ def classify_email(email: EmailMessage) -> EmailClassification:
         is_opportunity=is_opportunity,
         is_financial=is_financial,
         score_reasons=score_reasons,
+        is_transactional=is_transactional,
+        is_project=is_project,
+        is_promo=is_promo,
     )
 
     return EmailClassification(
@@ -383,6 +515,9 @@ def _build_audit_tags(
     is_opportunity: bool,
     is_financial: bool,
     score_reasons: list[str],
+    is_transactional: bool = False,
+    is_project: bool = False,
+    is_promo: bool = False,
 ) -> list[str]:
     """Build ordered audit tags from computed signals. Used for Telegram short_reason."""
     tags: list[str] = []
@@ -390,6 +525,8 @@ def _build_audit_tags(
         tags.append("HAS_DEADLINE")
     if requires_response:
         tags.append("ACTION_REQUIRED")
+    if is_transactional:
+        tags.append("FINANCIAL_TRANSACTION")
     if is_financial:
         tags.append("FINANCIAL_TOPIC")
     if is_follow_up:
@@ -402,6 +539,10 @@ def _build_audit_tags(
         tags.append("IMPORTANT_SENDER")
     if "bulk_sender" in score_reasons:
         tags.append("BULK_SENDER_PENALIZED")
+    if is_project:
+        tags.append("PROJECT_SIGNAL")
+    if is_promo:
+        tags.append("PROMOTIONAL_NOISE")
     return tags
 
 
@@ -425,6 +566,9 @@ def _score_email(
     is_opportunity: bool,
     sender: str,
     is_learned: bool = False,
+    is_transactional: bool = False,
+    is_project: bool = False,
+    is_promo: bool = False,
 ) -> tuple[int, list[str]]:
     """Compute contextual score from v1 flags, sender heuristic, and learned-sender check.
 
@@ -445,6 +589,15 @@ def _score_email(
     if is_follow_up:
         score += SCORE_WEIGHTS["is_follow_up"]
         reasons.append("is_follow_up")
+    if is_transactional:
+        score += SCORE_WEIGHTS["transactional"]
+        reasons.append("transactional")
+    if is_project:
+        score += SCORE_WEIGHTS["project"]
+        reasons.append("project")
+    if is_promo:
+        score += SCORE_WEIGHTS["promotional_noise"]
+        reasons.append("promotional_noise")
 
     sender_pts, sender_reason = _sender_score(sender)
     if sender_pts != 0:

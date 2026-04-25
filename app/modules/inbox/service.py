@@ -57,7 +57,8 @@ def _build_top5(
             or clf.is_follow_up
             or clf.is_opportunity
         )
-        if email.is_read and not has_action:
+        has_financial_transaction = "FINANCIAL_TRANSACTION" in clf.audit_tags
+        if email.is_read and not has_action and not has_financial_transaction:
             return False
         return True
 
@@ -132,7 +133,7 @@ class InboxService:
     def summarize_emails(self) -> dict:
         """Classify and summarize inbox with priority breakdown and operational flags."""
         try:
-            emails = self.client.list_recent_emails()
+            emails = self.client.list_recent_emails(max_results=20)
         except Exception as exc:
             logger.error("Falha ao buscar emails: %s", exc, exc_info=True)
             return {
@@ -158,11 +159,15 @@ class InboxService:
             1 for e in emails if classifications[e.id].category == "newsletter"
         )
 
-        # action_items: emails with any operational flag, ordered by score descending
+        # action_items: emails requiring direct action, ordered by score descending.
+        # Hard exclusions: newsletter/noise (never require direct action) and
+        # promotional/marketing content detected via PROMOTIONAL_NOISE tag.
         action_emails = sorted(
             [
                 e for e in emails
-                if (
+                if classifications[e.id].category not in ("newsletter", "noise")
+                and "PROMOTIONAL_NOISE" not in classifications[e.id].audit_tags
+                and (
                     classifications[e.id].requires_response
                     or classifications[e.id].has_deadline
                     or classifications[e.id].is_follow_up
