@@ -164,6 +164,128 @@ Calcula automaticamente: `expenses_paid`, `expenses_pending`, `income_received`,
 
 ---
 
+### Memory Module v1 (Fase 2A · Etapa 1)
+
+**Estado inicial:** o sistema não possuía nenhuma camada de memória. Decisões de classificação (email, news) eram efêmeras: o resultado era servido ao usuário e descartado. Nenhum registro de "o sistema decidiu X sobre o item Y às 10:32".
+
+**Implementação:**
+
+Criação do módulo `app/modules/memory/` como **observer passivo fail-safe** sobre os módulos existentes. Ele captura snapshots de decisão sem alterar fluxo, contratos ou comportamento dos serviços observados.
+
+**Tabela `memory_events`:**
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `id` | INTEGER PK | |
+| `created_at` | DateTime UTC | indexado |
+| `updated_at` | DateTime UTC | atualizado em `update` |
+| `event_type` | String(100) | indexado, livre (não enum) |
+| `source` | String(100) | indexado, livre |
+| `reference_id` | String(255) | nullable, indexado |
+| `payload` | Text (JSON) | snapshot completo da decisão |
+| `score` | Float | score do classificador no momento |
+| `feedback` | String(50) | preenchido pelo Telegram Feedback Loop |
+
+Unicidade: `UniqueConstraint(event_type, reference_id)` — idempotência ao nível de schema.
+
+**Princípios arquiteturais:**
+
+- **Observer passivo:** `_log_email_classifications` e `_log_ranked_news` são invocados após classificação/ranking, em sessões `SessionLocal` próprias (out-of-band). Nenhuma falha de logging propaga ao fluxo principal.
+- **Fail-safe tripla:** try/except em `MemoryService.log_event`, em cada helper de logging e a sessão de DB própria isola transações.
+- **Idempotência:** `log_event` faz `get_by_type_and_ref` antes de inserir; se existe, atualiza payload + score. Garante reprocessamento seguro do mesmo email/news.
+- **Payload como snapshot:** o payload preserva o estado completo da decisão no momento (categoria, prioridade, tags, razões, ID/link original) — não é dado livre. É o registro auditável que justifica o score.
+- **`reference_id` normalizado:** via `to_callback_ref(raw, max_len=32)` — se ≤ 32 chars, mantém o ID original (Gmail message IDs); se for maior (URLs), aplica `md5(raw)[:32]`. A mesma função é usada no logging e no botão do Telegram, garantindo lookup direto sem nova tabela ou cache externo.
+
+**Integrações cirúrgicas:**
+
+- `_log_email_classifications` invocado dentro de `InboxService.summarize_emails()` após `_classify_all`. Salva: `event_type=email_classified`, `source=email`, payload com `email_id` original, `category`, `priority`, `tags`, `reason`.
+- `_log_ranked_news` invocado dentro de `NewsService.summarize_news()` após curação e diversificação, antes do strip de campos internos. Salva: `event_type=news_ranked`, `source=news`, payload com `link` original, `title`, `category`, `reason`.
+
+**Cobertura de testes:** 22 testes em `tests/test_memory_module.py` — criação, idempotência, fail-safe, `add_feedback`, listagem com filtros, falha do repository não quebrar fluxo Inbox.
+
+**Capacidades atuais:**
+
+- Registro automático de toda decisão de classificação de email
+- Registro automático de toda decisão de ranking de news
+- Idempotência por `(event_type, reference_id)` — reprocessamento seguro
+- Fail-safe completo: falha no Memory **nunca** derruba Inbox/News/Briefing
+- Base preparada para feedback loop, score adaptativo e context engine
+
+---
+
+### Telegram Feedback Loop v1 (Fase 2A · Etapa 2)
+
+**Estado inicial:** os eventos do Memory Module v1 eram registrados mas o usuário não tinha como avaliá-los. O ciclo de aprendizado estava aberto.
+
+**Implementação:**
+
+Camada incremental sobre o Memory Module e o Telegram Bot que fecha o primeiro ciclo de feedback ativo:
+
+```text
+item exibido → botão pressionado → callback fb:<src>:<ref>:<sig>
+   → parse → MemoryService.add_feedback → memory_events.feedback
+```
+
+**Fluxo:**
+
+1. Após `/inbox` ou `/news` no Telegram, o webhook envia mensagens individuais por item (top-5 inbox e top-5 news), cada uma com 3 botões de feedback.
+2. Botões disponíveis: 👍 **Relevante** (`positive`), 👎 **Irrelevante** (`negative`), ⭐ **Prioridade** (`important`).
+3. `callback_data` segue o formato `fb:<src>:<ref>:<sig>`:
+   - `src`: `e` (email) ou `n` (news) — limita 1 char.
+   - `ref`: `to_callback_ref(reference_id)` — mesmo hash usado no logging, ≤ 32 chars.
+   - `sig`: `pos`, `neg` ou `imp` — limita 3 chars.
+   - Total: ≤ 41 bytes, **bem dentro do limite de 64 bytes do Telegram**.
+4. O webhook intercepta callbacks com prefixo `fb:` ANTES do answer genérico, permitindo `answerCallbackQuery` com texto específico ("Feedback registrado." ou "Não consegui salvar agora, mas registrei sua intenção.").
+5. `MemoryService.add_feedback(reference_id, feedback, source=..., event_type=...)` faz lookup pelo índice unique `(event_type, reference_id)` e atualiza apenas o campo `feedback` — não cria novo evento.
+
+**Hash determinístico para IDs longos:**
+
+`to_callback_ref(raw, max_len=32)` é a chave da consistência ponta-a-ponta:
+
+- IDs curtos (Gmail message IDs ≤ 32 chars) preservados como-são — `reference_id` continua legível no DB.
+- IDs longos (URLs RSS) viram hash MD5 truncado de 32 chars — colisão astronomicamente improvável para o volume diário do sistema.
+- A **mesma função** roda no logging e no botão; lookup pelo hash é direto, sem tabela auxiliar nem cache externo.
+
+**Proteção contra falhas (3 níveis):**
+
+1. **Parser estrito:** `_parse_feedback_callback` rejeita qualquer desvio do contrato (prefixo errado, número errado de partes, src/sig fora do mapa, ref vazio, tipo errado). Defensivo contra payload forjado.
+2. **MemoryService fail-safe:** `add_feedback` retorna `bool` — `False` em "evento não encontrado" ou "erro interno". Nunca propaga exceção.
+3. **Per-item resilience nos helpers de envio:** após audit, o `try/except` foi movido para dentro do `for` em `send_inbox_items_with_feedback` e `send_news_items_with_feedback`. Falha em um item é logada (warning) e os itens seguintes continuam sendo enviados.
+
+**Integração com `add_feedback` retrocompatível:**
+
+A assinatura foi estendida com kwargs opcionais `source` e `event_type` para desambiguar quando o mesmo `reference_id` aparece em múltiplos `event_type`. Quando `event_type` é fornecido, usa o índice unique direto. Chamadas antigas com apenas `(reference_id, feedback)` continuam funcionando.
+
+**Cobertura de testes:** 36 testes em `tests/test_telegram_feedback.py`:
+
+- Parser de callback (válido + 9 cenários inválidos, type defensivo).
+- Limite de 64 bytes do `callback_data` validado com input de 200 chars.
+- Persistência de cada sinal (positive/negative/important) em email e news.
+- Desambiguação por `event_type` (mesmo `reference_id` em event_types diferentes).
+- Fail-safe: parser inválido, MemoryService raise, answer_callback raise, callback_query_id vazio.
+- Helpers de envio: skip de itens sem ID, callback dentro do limite, top5 vazio, falha interna.
+- **E2E hash invariant** (correção pós-audit): pipeline completo `summarize_emails`/`_log_ranked_news` → memory → button → parse → `add_feedback` → persistência. Prova que o hash salvo no DB é idêntico ao hash que sai pelo callback.
+- **Per-item resilience** (correção pós-audit): item 0 raise → itens 1..N continuam.
+- **Webhook regression real** via `TestClient`: `/finance` e `fin:menu` não disparam helpers de feedback; `fb:e:<ref>:pos` é roteado corretamente.
+- Regressão de intent classifier para `/finance`, `/expense`, `/income`, `/balance`, `/inbox`, `/news`, `/briefing`.
+
+**Capacidades atuais:**
+
+- Botões de feedback automaticamente exibidos por item após `/inbox` e `/news` no Telegram
+- Persistência confiável do feedback em `memory_events.feedback`
+- Hash determinístico ponta-a-ponta — sem colisão prática, sem nova tabela, sem cache
+- Fail-safe completo — webhook nunca quebra por feedback
+- Suite de regressão protegida contra futuras alterações que rompam a invariante hash
+
+**Limitações conhecidas (v1):**
+
+- Briefing consolidado (`format_briefing_blocks`, `/admin/trigger-briefing`) não exibe botões de feedback — limitação aceita; eventos seguem sendo registrados, mas não há UX de feedback nesse fluxo.
+- Itens sem `reference_id` válido (link/ID ausente) são silenciosamente pulados.
+- Sem indicação visual quando o usuário já avaliou um item — clicar duas vezes apenas atualiza o registro.
+- `add_feedback` retorna `False` indistintamente para "evento não encontrado" e "erro interno" — mensagem soft-fail é a mesma.
+
+---
+
 ## 4. Decisões Arquiteturais Globais
 
 **Determinístico (sem IA):** Decisão deliberada para Fase 1. Comportamento previsível, depurável, sem infraestrutura adicional. Pontos de extensão para IA estão identificados no código (`TODO: [V4]`) mas não implementados.

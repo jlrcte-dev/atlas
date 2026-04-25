@@ -34,10 +34,12 @@ Telegram / API
 ┌─────────────────────────┐
 │ SQLite                  │
 │ ├─ users                │
-│ ├─ document_catalog     │  ← NOVO (Fase 1)
+│ ├─ document_catalog     │  ← Fase 1
 │ ├─ draft_actions        │
 │ ├─ audit_logs           │
-│ └─ daily_briefings      │
+│ ├─ daily_briefings      │
+│ ├─ finance_*            │  ← Fase 1 (Finance v1.1)
+│ └─ memory_events        │  ← NOVO (Fase 2A — Memory + Feedback Loop)
 └─────────────────────────┘
 ```
 
@@ -276,4 +278,54 @@ Próximo foco (refinamento, não expansão):
   □ Classificação de prioridade mais inteligente (Claude-based)
   □ Sumarização contextual de emails
   □ Priorização cross-source (agenda + inbox)
+```
+
+---
+
+## Fase 2A — Inteligência Controlada (em curso)
+
+### Memory Module v1
+
+`app/modules/memory/` registra cada decisão do sistema como snapshot auditável.
+
+```text
+memory_events
+  ├─ event_type     ("email_classified" | "news_ranked" | …)
+  ├─ source         ("email" | "news" | …)
+  ├─ reference_id   (normalizado via to_callback_ref, ≤ 32 chars)
+  ├─ payload (JSON) (snapshot da decisão: categoria, tags, razões, ID original)
+  ├─ score          (score do classificador no momento)
+  └─ feedback       (preenchido pelo Telegram Feedback Loop)
+```
+
+- **Idempotência:** UniqueConstraint(`event_type`, `reference_id`)
+- **Fail-safe:** falha no Memory nunca derruba Inbox/News/Briefing
+- **Out-of-band:** `_log_email_classifications` e `_log_ranked_news` usam `SessionLocal` próprias
+
+### Telegram Feedback Loop v1
+
+Após `/inbox` ou `/news`, cada item top-5 é enviado como mensagem individual com 3 botões:
+
+```text
+👍 Relevante   → fb:<e|n>:<ref>:pos
+👎 Irrelevante → fb:<e|n>:<ref>:neg
+⭐ Prioridade  → fb:<e|n>:<ref>:imp
+
+callback_data ≤ 41 bytes (limite Telegram = 64)
+```
+
+- **Lookup direto:** mesmo `to_callback_ref(raw)` aplicado no logging e no botão — sem tabela auxiliar
+- **Webhook:** branch `fb:` curto-circuita antes do answer genérico para responder com toast específico
+- **`MemoryService.add_feedback(ref, feedback, *, source=None, event_type=None) -> bool`** — backward compatible
+
+### Backlog conhecido (Fase 2A)
+
+```text
+□ Mover _FB_SRC_MAP / _FB_SIG_MAP para camada compartilhada (hoje em routes.py)
+□ Reduzir colisão hipotética em news sem link (incluir source no fallback do hash)
+□ Extrair helper _format_inbox_item_text (deduplicar entre briefing e feedback)
+□ Avaliar mover to_callback_ref para app/core (acoplamento integrations → modules)
+□ Diferenciar "evento inexistente" de "erro interno" no retorno de add_feedback
+□ Feedback no briefing consolidado (format_briefing_blocks)
+□ Score adaptativo v1 (próxima etapa da Fase 2A)
 ```

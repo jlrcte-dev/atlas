@@ -85,6 +85,49 @@ def _build_top5(
     return result
 
 
+def _log_email_classifications(
+    emails: list[EmailMessage],
+    classifications: dict[str, EmailClassification],
+) -> None:
+    """Log email classification events to memory. Fail-safe — never raises.
+
+    The reference_id is normalized via `to_callback_ref` so the same value can
+    be reused inside Telegram callback_data without exceeding the 64-byte limit.
+    """
+    try:
+        from app.db.session import SessionLocal
+        from app.modules.memory.service import MemoryService
+        from app.modules.memory.utils import to_callback_ref
+
+        db = SessionLocal()
+        try:
+            svc = MemoryService(db)
+            for email in emails:
+                clf = classifications.get(email.id)
+                if not clf:
+                    continue
+                ref = to_callback_ref(email.id)
+                if not ref:
+                    continue
+                svc.log_event(
+                    event_type="email_classified",
+                    source="email",
+                    reference_id=ref,
+                    payload={
+                        "email_id": email.id,
+                        "category": clf.category,
+                        "priority": clf.priority,
+                        "tags": clf.audit_tags,
+                        "reason": clf.reason_codes,
+                    },
+                    score=float(clf.score),
+                )
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Memory: falha ao logar classificacoes de email: %s", exc)
+
+
 def _build_default_client() -> BaseEmailClient:
     provider = settings.email_provider.lower()
     if provider == "gmail":
@@ -150,6 +193,7 @@ class InboxService:
             }
 
         classifications = _classify_all(emails)
+        _log_email_classifications(emails, classifications)
 
         high = [e for e in emails if classifications[e.id].priority == "alta"]
         medium = [e for e in emails if classifications[e.id].priority == "media"]

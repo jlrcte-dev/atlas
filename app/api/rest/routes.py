@@ -375,6 +375,90 @@ def trigger_briefing(db: Session = Depends(get_db)) -> dict:
 # ── Telegram Webhook ──────────────────────────────────────────────
 
 
+# ── Feedback callbacks (Memory loop) ──────────────────────────────
+
+# src letter → (memory source, memory event_type)
+_FB_SRC_MAP: dict[str, tuple[str, str]] = {
+    "e": ("email", "email_classified"),
+    "n": ("news", "news_ranked"),
+}
+
+# sig token → feedback string persisted in memory_events.feedback
+_FB_SIG_MAP: dict[str, str] = {
+    "pos": "positive",
+    "neg": "negative",
+    "imp": "important",
+}
+
+
+def _parse_feedback_callback(data: str) -> tuple[str, str, str] | None:
+    """Parse a `fb:<src>:<ref>:<sig>` callback. Return (src, ref, sig) or None.
+
+    Strict validation: any deviation from the contract returns None so the
+    webhook can short-circuit without persisting garbage.
+    """
+    if not isinstance(data, str) or not data.startswith("fb:"):
+        return None
+    parts = data.split(":", 3)
+    if len(parts) != 4:
+        return None
+    _, src, ref, sig = parts
+    if src not in _FB_SRC_MAP or sig not in _FB_SIG_MAP or not ref:
+        return None
+    return src, ref, sig
+
+
+def _handle_feedback_callback(
+    bot: TelegramBot,
+    db: Session,
+    callback_query_id: str,
+    data: str,
+) -> None:
+    """Persist user feedback from a Telegram inline button. Fail-safe at every step.
+
+    1. Invalid callback_data → log and answer "Feedback invalido."
+    2. MemoryService raises → answer with the fallback message.
+    3. answer_callback_query raises → log only; never propagate.
+    """
+    parsed = _parse_feedback_callback(data)
+    if parsed is None:
+        logger.warning("Feedback callback invalido: %s", data)
+        try:
+            if callback_query_id:
+                bot.answer_callback_query(callback_query_id, "Feedback invalido.")
+        except Exception as exc:
+            logger.warning("Falha ao responder callback invalido: %s", exc)
+        return
+
+    src, ref, sig = parsed
+    source, event_type = _FB_SRC_MAP[src]
+    feedback = _FB_SIG_MAP[sig]
+
+    saved = False
+    try:
+        from app.modules.memory.service import MemoryService
+
+        saved = MemoryService(db).add_feedback(
+            reference_id=ref,
+            feedback=feedback,
+            source=source,
+            event_type=event_type,
+        )
+    except Exception as exc:
+        logger.warning("Memory.add_feedback falhou no webhook: %s", exc)
+
+    answer_text = (
+        "Feedback registrado."
+        if saved
+        else "Não consegui salvar agora, mas registrei sua intenção."
+    )
+    try:
+        if callback_query_id:
+            bot.answer_callback_query(callback_query_id, answer_text)
+    except Exception as exc:
+        logger.warning("Falha ao responder callback de feedback: %s", exc)
+
+
 def _translate_callback(data: str) -> str:
     """Convert callback_data to an orchestrator-compatible command.
 
@@ -465,12 +549,21 @@ async def telegram_webhook(
         logger.warning("Unauthorized Telegram user: %s", parsed["user_id"])
         return {"ok": True}
 
+    raw_cb = parsed.get("text", "") if parsed["type"] == "callback" else ""
+
+    # Feedback callbacks: handled (and answered) here. Short-circuit before the
+    # generic spinner-removal so we can answer with a specific text.
+    if parsed["type"] == "callback" and raw_cb.startswith("fb:"):
+        _handle_feedback_callback(
+            bot, db, parsed.get("callback_query_id", ""), raw_cb,
+        )
+        return {"ok": True}
+
     # Answer callback immediately — removes the loading spinner on the button
     if parsed["type"] == "callback" and parsed.get("callback_query_id"):
         bot.answer_callback_query(parsed["callback_query_id"])
 
     # Finance menu callbacks: intercepted here, never reach the orchestrator
-    raw_cb = parsed.get("text", "")
     if parsed["type"] == "callback" and (
         (raw_cb.startswith("fin:") and raw_cb != "fin:sum") or raw_cb == "main:menu"
     ):
@@ -494,6 +587,13 @@ async def telegram_webhook(
 
     # Escape orchestrator output before sending as HTML to prevent injection from external data
     bot.send_message(parsed["chat_id"], esc(result.get("message", "OK")))
+
+    # Render individual items with feedback buttons (Memory loop, fail-safe).
+    intent = result.get("intent")
+    if intent == "get_inbox_summary":
+        bot.send_inbox_items_with_feedback(parsed["chat_id"], result.get("data") or {})
+    elif intent == "get_news":
+        bot.send_news_items_with_feedback(parsed["chat_id"], result.get("data") or {})
 
     # After /start or /help, attach the interactive main menu
     if command.strip().split()[0] in ("/start", "/help", "/ajuda"):

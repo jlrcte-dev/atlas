@@ -277,6 +277,46 @@ def _infer_focus(curated: list[dict]) -> list[str]:
     return [_CATEGORY_LABELS.get(cat, cat) for cat, _ in counts.most_common(2)]
 
 
+# ── Memory integration (fail-safe) ───────────────────────────────────────────
+
+def _log_ranked_news(curated: list[dict]) -> None:
+    """Log ranked news events to memory. Fail-safe — never raises.
+
+    The reference_id is normalized via `to_callback_ref` so the same value can
+    be reused inside Telegram callback_data without exceeding the 64-byte limit.
+    The original link is preserved in the payload for full audit trail.
+    """
+    try:
+        from app.db.session import SessionLocal
+        from app.modules.memory.service import MemoryService
+        from app.modules.memory.utils import to_callback_ref
+
+        db = SessionLocal()
+        try:
+            svc = MemoryService(db)
+            for item in curated:
+                raw = item.get("link") or item.get("title", "")
+                ref = to_callback_ref(raw)
+                if not ref:
+                    continue
+                svc.log_event(
+                    event_type="news_ranked",
+                    source="news",
+                    reference_id=ref,
+                    payload={
+                        "link": item.get("link", ""),
+                        "title": item.get("title", ""),
+                        "category": item.get("category", ""),
+                        "reason": item.get("score_reasons", []),
+                    },
+                    score=float(item["score"]) if item.get("score") is not None else None,
+                )
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Memory: falha ao logar noticias rankeadas: %s", exc)
+
+
 # ── Service ───────────────────────────────────────────────────────────────────
 
 class NewsService:
@@ -369,6 +409,7 @@ class NewsService:
 
         # ── Layer 10: Diversity ───────────────────────────────────────────────
         curated = _diversify(curated, ranked)
+        _log_ranked_news(curated)
 
         # ── Layer 11: Output ──────────────────────────────────────────────────
         # Strip internal fields before serialization — must happen before

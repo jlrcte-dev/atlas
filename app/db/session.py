@@ -18,6 +18,7 @@ class Base(DeclarativeBase):
 
 def create_db_and_tables() -> None:
     from app.db import models  # noqa: F401
+    from app.modules.memory import models as _memory_models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
 

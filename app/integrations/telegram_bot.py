@@ -333,3 +333,115 @@ class TelegramBot:
                 ]
             ]
         }
+
+    # ── Feedback (Memory loop) ───────────────────────────────────
+
+    @staticmethod
+    def build_feedback_keyboard(src: str, ref: str) -> dict:
+        """Build inline keyboard with feedback buttons for a single item.
+
+        Format `fb:<src>:<ref>:<sig>` is kept short to stay well under
+        Telegram's 64-byte callback_data limit. `ref` must already be a short
+        identifier (≤ 32 chars) — see `app.modules.memory.utils.to_callback_ref`.
+        """
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "👍 Relevante",   "callback_data": f"fb:{src}:{ref}:pos"},
+                    {"text": "👎 Irrelevante", "callback_data": f"fb:{src}:{ref}:neg"},
+                    {"text": "⭐ Prioridade",  "callback_data": f"fb:{src}:{ref}:imp"},
+                ]
+            ]
+        }
+
+    def send_inbox_items_with_feedback(self, chat_id: str | int, inbox_data: dict) -> None:
+        """Send each top-5 inbox item as an individual message with feedback buttons.
+
+        Per-item fail-safe — a malformed item is logged and skipped so that
+        remaining items still reach the user.
+        """
+        try:
+            from app.modules.memory.utils import to_callback_ref
+        except Exception as exc:
+            logger.warning("send_inbox_items_with_feedback: setup falhou: %s", exc)
+            return
+
+        top5 = inbox_data.get("top5") or []
+        if not top5:
+            return
+
+        priority_icon = {"alta": "🔴", "media": "🟡", "baixa": "⚪"}
+        for item in top5:
+            try:
+                raw_id = item.get("id", "")
+                ref = to_callback_ref(raw_id) if raw_id else ""
+                if not ref:
+                    continue
+
+                icon = priority_icon.get(item.get("priority", ""), "⚪")
+                subject = item.get("subject", "") or "(sem assunto)"
+                short_subj = (subject[:57] + "…") if len(subject) > 60 else subject
+                sender_raw = item.get("sender", "") or ""
+                if "<" in sender_raw:
+                    sender = sender_raw.split("<")[0].strip() or sender_raw
+                elif "@" in sender_raw:
+                    sender = sender_raw.split("@")[0]
+                else:
+                    sender = sender_raw
+
+                short_reason = item.get("short_reason", "") or ""
+                tail = f" · {esc(short_reason)}" if short_reason else ""
+                text = (
+                    f"{icon} <b>{esc(short_subj)}</b>\n"
+                    f"De: {esc(sender)}{tail}"
+                )
+                self.send_message(
+                    chat_id, text,
+                    reply_markup=self.build_feedback_keyboard("e", ref),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "send_inbox_items_with_feedback: item %s falhou: %s",
+                    item.get("id", "?"), exc,
+                )
+                continue
+
+    def send_news_items_with_feedback(self, chat_id: str | int, news_data: dict) -> None:
+        """Send each curated news item as an individual message with feedback buttons.
+
+        Per-item fail-safe — a malformed item is logged and skipped so that
+        remaining items still reach the user.
+        """
+        try:
+            from app.modules.memory.utils import to_callback_ref
+        except Exception as exc:
+            logger.warning("send_news_items_with_feedback: setup falhou: %s", exc)
+            return
+
+        items = (news_data.get("items") or [])[:5]
+        if not items:
+            return
+
+        for item in items:
+            try:
+                raw = item.get("link") or item.get("title", "") or ""
+                ref = to_callback_ref(raw) if raw else ""
+                if not ref:
+                    continue
+
+                icon = "🔴" if item.get("priority") == "high" else "🟡"
+                title = item.get("title", "") or "(sem titulo)"
+                short_title = (title[:77] + "…") if len(title) > 80 else title
+                category = item.get("category", "") or ""
+                cat_tag = f" <i>[{esc(category)}]</i>" if category else ""
+                text = f"{icon} <b>{esc(short_title)}</b>{cat_tag}"
+                self.send_message(
+                    chat_id, text,
+                    reply_markup=self.build_feedback_keyboard("n", ref),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "send_news_items_with_feedback: item %s falhou: %s",
+                    item.get("link") or item.get("title", "?"), exc,
+                )
+                continue

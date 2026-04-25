@@ -51,6 +51,29 @@ Correções aplicadas após auditoria técnica do módulo de email:
 - **Briefing resiliente a falhas de inbox**: `InboxService.summarize_emails` agora retorna fallback seguro em caso de falha da API — `/briefing` não derruba mais quando o email está indisponível
 - **Token Outlook resiliente**: token Microsoft migrado do `__init__` para cada request via MSAL — sem expiração silenciosa após ~1h de servidor em execução
 
+### ✅ Milestone 6 — Memory Module v1 + Telegram Feedback Loop v1 (Fase 2A)
+
+Primeira camada de **inteligência controlada** sobre os módulos da Fase 1 — sem IA, sem LLM, apenas infraestrutura para fechar o ciclo "decisão do sistema → feedback do usuário".
+
+**Etapa 1 — Memory Module v1:**
+
+- Novo módulo `app/modules/memory/` como observer passivo fail-safe
+- Tabela `memory_events` com unicidade `(event_type, reference_id)` ao nível de schema
+- `MemoryService.log_event` idempotente: salva snapshot completo da decisão (categoria, prioridade, tags, razões)
+- Integrações cirúrgicas em `_log_email_classifications` (Inbox) e `_log_ranked_news` (News) — out-of-band via `SessionLocal` própria, sem afetar fluxo principal
+- Fail-safe: falha no Memory **nunca** derruba Inbox/News/Briefing (testado via injeção de erro)
+
+**Etapa 2 — Telegram Feedback Loop v1:**
+
+- Botões 👍 Relevante / 👎 Irrelevante / ⭐ Prioridade nas mensagens de `/inbox` e `/news` no Telegram
+- `callback_data` no formato `fb:<src>:<ref>:<sig>` ≤ 41 bytes (limite Telegram = 64 bytes)
+- `to_callback_ref(raw)` em `app/modules/memory/utils.py`: hash MD5 truncado em 32 chars para IDs longos (URLs); preserva IDs curtos (Gmail) inalterados — usado nos dois lados garantindo lookup direto, sem nova tabela ou cache
+- `MemoryService.add_feedback` estendido com kwargs opcionais `source` e `event_type` (backward compat) e retorno `bool`
+- Webhook ganhou branch `fb:` antes do answer genérico para responder `answerCallbackQuery` com texto específico
+- Per-item resilience nos helpers de envio: falha em um item não aborta os demais
+
+**Cobertura:** 22 testes Memory + 36 testes Feedback Loop. Suite completa: 414/414. Cobertura: 81%. Zero regressão em Inbox, News/Briefing, Finance ou Telegram. Contratos públicos intactos.
+
 ---
 
 ## TRANSIÇÃO DE FASE
