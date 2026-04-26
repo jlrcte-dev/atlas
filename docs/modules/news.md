@@ -1,6 +1,8 @@
 # Módulo News / RSS — Atlas AI Assistant
 
-> Documentação técnica oficial. Ciclo V1–V4 concluído. Última atualização: Abril 2026.
+> Documentação técnica oficial. Ciclo V1–V3.2 concluído (V4 = baseline avançado intermediário). Última atualização: Abril 2026 (pós-V3.2).
+>
+> **Convenção de versão:** V1 → V2 → V3 → V4 (baseline avançado: scope gate v1 + SimHash) → V3.1 (calibração de curadoria) → V3.2 (calibração do scope gate). V3.1 e V3.2 são releases de calibração mínima sobre o baseline V3+V4 — preservam contratos, ajustam comportamento.
 
 ---
 
@@ -152,6 +154,88 @@ Cinco pontos `TODO: [V4]` inseridos nos locais de extensão natural:
 
 ---
 
+### V3.1 — Fallback de Curadoria + Contadores + Alinhamento Telegram
+
+*(Release de calibração aplicado pós-V4. Endereça efeito observado em uso real: dias com poucos sinais geravam menu `/news` com 0–2 itens.)*
+
+**O que foi implementado:**
+
+- **Fallback de curadoria HIGH → MEDIUM → LOW:** `_curate_top5()` em `news_service.py` foi calibrada para aceitar itens `low` como preenchimento quando `high + medium` não atingem o limite de 5. Ordem de prioridade preservada: HIGH (cap 3) → MEDIUM → LOW (fallback). LOW só entra após `high + medium`; nunca antes. Itens `low` continuam descartados se HIGH/MEDIUM já cobrem 5 vagas.
+- **Contadores completos no `log_action`:** adicionados `raw_total`, `dedup_removed`, `medium`, `low`, `final_total` aos já existentes (`fetched_today`, `low_quality`, `scope_dropped`, `simhash_dropped`, `curated`, `high`, `noise`). Auditoria do funil completa em uma linha de log.
+- **Summary com linha condicional:** `news["summary"]` passa a incluir "Outras relevantes: N" apenas quando o fallback LOW preenche slots. Quando HIGH/MEDIUM cobrem o radar, summary permanece compacto.
+- **Telegram alinhado por prioridade:** `format_briefing_blocks()` e `send_news_items_with_feedback()` em `telegram_bot.py` passaram a usar mapping explícito `{high: 🔴, medium: 🟡, low: ⚪}`. Briefing e menu `/news` consomem o mesmo payload de `summarize_news()` — não há divergência de lógica entre os dois fluxos.
+
+**Garantia de não-regressão:**
+
+- Contrato de `summarize_news()` preservado (mesmas chaves, mesmos tipos).
+- `total` permanece bounded em ≤ 5.
+- `_log_ranked_news`, `_diversify`, `_strip_internal_fields` não tocados.
+- Suite completa: 416/416 antes → 416/416 depois (zero regressão).
+
+**Comportamento esperado pós-V3.1:**
+
+| Cenário | Antes | Depois |
+|---|---|---|
+| 4 HIGH + 3 MEDIUM no pool | 5 itens (3 HIGH + 2 MEDIUM) | 5 itens (3 HIGH + 2 MEDIUM) — inalterado |
+| 0 HIGH + 2 MEDIUM + 8 LOW | 2 itens | 5 itens (2 MEDIUM + 3 LOW) |
+| 0 HIGH + 0 MEDIUM + 6 LOW | 0 itens (radar vazio) | 5 itens (5 LOW) |
+| 5 HIGH | 5 itens (cap 3 HIGH não atingido — cap aplica) | 3 HIGH + 2 MEDIUM (se houver); senão 3 HIGH + 2 LOW |
+
+---
+
+### V3.2 — Calibração do Scope Gate (`evaluate_scope`)
+
+*(Release de calibração aplicado pós-V4 e pós-V3.1. Endereça gargalo identificado: o scope gate v1 de V4 era o filtro mais agressivo do pipeline.)*
+
+**Diagnóstico que motivou o V3.2:**
+
+| Notícia | Antes (scope gate v1) | Após V3.2 |
+|---|---|---|
+| "Bolsa fecha em alta com investidores" | ❌ dropped (só "ibov" estava listado) | ✅ Group B (macro) |
+| "Lucro do Bradesco sobe 10%" | ❌ dropped | ✅ Group A (tracked_asset) |
+| "Nvidia anuncia novo chip de IA" | ❌ dropped (sem grupo de tech) | ✅ Group D (strategic) |
+| "Reforma tributária aprovada" | ❌ dropped (política não no Group B) | ✅ Group B (macro) |
+| "Empresa entra em default após calote" | ❌ dropped (sem grupo) | ✅ fallback_relevant |
+
+**O que foi implementado em `tracked_scope.py`:**
+
+- **Grupo A — ativos monitorados + setor:** mantém Petrobras/Vale/Ambev/Itaúsa/Ibovespa e expande para principais bancos (Itaú/Bradesco/BB/Santander/BTG), Eletrobras, varejo (Magalu, Renner, Via), aéreas (Azul, Gol), siderurgia/mineração (CSN, Usiminas, Gerdau), proteína (JBS, Marfrig, BRF) e telecom (Vivo).
+- **Grupo B — macro / mercado / commodities:** expandido com termos de bolsa (`bolsa`, `ações`, `b3`, `ipo`, `dividendos`, `fii`), commodities (`soja`, `milho`, `café`, `ouro`), indicadores faltantes (`pib`, `igpm`, `desemprego`, `recessão`, `deflação`, `balança comercial`), reforma tributária/previdência, instituições (Receita Federal, BNDES, CVM, FMI, OCDE, Fed) e regulação financeira.
+- **Grupo C — geopolítica:** expandido com `tarifas comerciais`, `guerra comercial`, `barreira comercial`.
+- **Grupo D — tecnologia estratégica (NOVO):** OpenAI, Anthropic, Claude, Gemini, Nvidia, Microsoft/Azure, Alphabet/Google Cloud, Meta, Apple, AWS, semicondutores, TSMC, ASML, IA generativa, cloud computing, cibersegurança, big tech.
+- **Fallback `relevant`:** quando nenhum grupo bate, `evaluate_scope` admite o item se ele carregar pelo menos um sinal de impacto **e** não bater em `_NOISE_RE`. O fallback reusa diretamente os patterns compilados de `news_classifier.py` (`_MARKET_IMPACT_RE`, `_ECONOMIC_IMPACT_RE`, `_POLICY_IMPACT_RE`, `_STRONG_SIGNAL_RE`, `_NOISE_RE`) — zero duplicação, zero dependência nova.
+
+**Contadores `scope_pass_*` no `log_action` de `summarize_news`:**
+
+- `scope_pass_tracked_asset` — itens admitidos pelo Group A
+- `scope_pass_macro` — itens admitidos pelo Group B
+- `scope_pass_geopolitical` — itens admitidos pelo Group C
+- `scope_pass_strategic` — itens admitidos pelo Group D
+- `scope_fallback_relevant` — itens admitidos pelo fallback de impacto
+- `scope_dropped` — itens descartados (já existia)
+
+**Cobertura de testes:**
+
+Arquivo dedicado `tests/test_news_scope.py` com 21 testes:
+
+- 3× Group A (Petrobras, Bradesco, Magalu)
+- 4× Group B (bolsa, petróleo, reforma tributária, PIB)
+- 2× Group C (guerra, tarifas comerciais)
+- 3× Group D (Nvidia, OpenAI, cibersegurança)
+- 2× fallback (default/calote, decreto)
+- 4× negativos (atriz/celebridade, esporte, filme, meditação)
+- 2× anti-noise no fallback (clickbait com "crise", promo com "crise")
+- 1× contrato `summarize_news` preservado
+
+**Garantia de não-regressão:**
+
+- 437/437 testes passam (416 prévios + 21 novos).
+- Contrato de `summarize_news()` intacto (chaves `total`, `categories`, `by_category`, `items`, `summary`).
+- Nenhuma mudança em `score`/`threshold`/`dedup`/`simhash`/`quality_gate`/`date_gate`.
+- `total` permanece ≤ 5.
+
+---
+
 ## 3. Arquitetura do Módulo
 
 ### Visão de Componentes
@@ -190,14 +274,16 @@ Feeds RSS configurados (settings.rss_default_feeds)
         ├── Layer 2: Quality gate
         │   └── is_low_quality() → descarta listicles, clickbait, títulos curtos
         │
-        ├── Layer 3: Scope gate   [V4]
+        ├── Layer 3: Scope gate   [V4 + V3.2 calibration]
         │   └── _normalize_text() → normalized_text (computado uma única vez)
         │       evaluate_scope(normalized_text)
-        │       ├── Grupo A: petrobras, vale3, ambev, ibovespa…
-        │       ├── Grupo B: selic, copom, banco central, câmbio…
-        │       └── Grupo C: guerra, sanções, conflito internacional…
+        │       ├── Grupo A: petrobras, vale3, ambev, ibovespa, bradesco, magalu, jbs…
+        │       ├── Grupo B: selic, copom, bolsa, ações, b3, pib, reforma tributária…
+        │       ├── Grupo C: guerra, sanções, tarifas comerciais, embargo…
+        │       ├── Grupo D: openai, nvidia, big tech, semicondutor, ia generativa… [V3.2]
+        │       └── Fallback: sinal de impacto + not noise → "fallback_relevant" [V3.2]
         │       • DROP → scope_dropped_count++ (não chega a classify_news)
-        │       • PASS → continua com normalized_text reutilizado
+        │       • PASS → scope_pass_<reason>++; segue com normalized_text reutilizado
         │
         ├── Layer 4: Classification   [V4 — reutiliza normalized_text]
         │   └── _build_item(article, normalized_text)
@@ -228,8 +314,10 @@ Feeds RSS configurados (settings.rss_default_feeds)
         │       • final_score = score + quality_score*2
         │       • sort: final_score DESC → published DESC
         │
-        ├── Layer 9: Curation
-        │   └── _curate_top5() → max 3 high + medium, low descartado
+        ├── Layer 9: Curation   [V3.1 fallback]
+        │   └── _curate_top5() → HIGH (cap 3) → MEDIUM → LOW (fallback)
+        │       • LOW só preenche slots quando HIGH+MEDIUM ficam < 5
+        │       • LOW continua descartado se HIGH/MEDIUM já cobrem o radar
         │
         ├── Layer 10: Diversity
         │   └── _diversify() → cap same-category ≤ 2 quando alternativa existe
@@ -396,6 +484,166 @@ pontos-base → "25 pontos-base"
 4. Perdedor: marcado com `is_duplicate_candidate=True` e descartado do output
 5. Score do vencedor: nunca modificado
 6. Limitação: detecta apenas títulos idênticos pós-normalização; artigos sobre o mesmo evento com títulos diferentes **não** são deduplificados
+
+---
+
+## 5.5. Scope Gate (V3.2 — calibrado)
+
+O scope gate é a Layer 3 do pipeline e decide quem entra na classificação. Roda **antes** do classifier, então não tem acesso a `flags`/`score`. Vive em `app/integrations/tracked_scope.py` e expõe a função pública `evaluate_scope(normalized_text) -> (bool, str | None)`.
+
+### Razões de admissão (auditáveis)
+
+| Razão | Significado | Exemplos |
+|---|---|---|
+| `tracked_asset` | Match no Grupo A — ativos monitorados / sector leaders B3 | "Lucro do Bradesco sobe 10%" |
+| `macro` | Match no Grupo B — macro / mercado / commodities / política econômica | "Bolsa fecha em alta", "Reforma tributária aprovada" |
+| `geopolitical` | Match no Grupo C — geopolítica com impacto material em mercado | "Tarifas comerciais americanas", "Guerra comercial" |
+| `strategic` | Match no Grupo D — tecnologia estratégica / business AI | "Nvidia anuncia novo chip", "OpenAI lança GPT-X" |
+| `fallback_relevant` | Nenhum grupo bateu, mas há sinal de impacto e não é ruído | "Empresa entra em default após calote" |
+| `None` (drop) | Fora de escopo | Esporte, entretenimento, lifestyle |
+
+A ordem de avaliação é A → B → C → D → fallback. A razão mais específica é retornada para auditoria.
+
+### Grupo A — Tracked Assets + Sector Leaders
+
+Mantém os ativos do portfólio + principais setores que movem o Ibovespa:
+
+- **Portfólio core:** Petrobras (PETR3/4), Vale (VALE3), Ambev (ABEV3), Itaúsa (ITSA4), Ibovespa/IBOV/Bovespa
+- **Bancos:** Itaú (ITUB4), Bradesco (BBDC3/4), Banco do Brasil (BBAS3), Santander (SANB11), BTG Pactual (BTGP4)
+- **Energia:** Eletrobras (ELET3/6)
+- **Varejo:** Magazine Luiza (MGLU3), Via Varejo (VIIA3), Lojas Renner (LREN3)
+- **Aéreas:** Azul (AZUL4), Gol (GOLL4)
+- **Siderurgia/Mineração:** CSN (CSNA3), Usiminas (USIM5), Gerdau (GGBR4)
+- **Proteína/Agro:** JBS (JBSS3), Marfrig (MRFG3), BRF (BRFS3)
+- **Telecom:** Vivo / Telefônica (VIVT3)
+
+### Grupo B — Macro / Mercado / Commodities / Política Econômica
+
+- **Política monetária/fiscal:** política monetária, política fiscal, arcabouço fiscal, dívida pública, Selic, Copom, Bacen, banco central, IPCA, IGPM, juros, taxa de juros, déficit, superávit
+- **Câmbio / commodities:** câmbio, dólar, petróleo, minério de ferro, soja, milho, café, ouro, açúcar
+- **Mercado / equity:** bolsa, ações, B3, IPO, dividendos, valuation, FII/fundos imobiliários, renda variável, renda fixa, tesouro direto, mercado financeiro, mercado de capitais
+- **Indicadores macro:** PIB, inflação, deflação, recessão, desemprego, balança comercial, reservas internacionais
+- **Política econômica:** reforma tributária, reforma da previdência, medida provisória, imposto de renda, ministério da fazenda, ministério da economia
+- **Instituições:** Receita Federal, BNDES, CVM, FMI, OCDE, Fed, federal reserve, banco central europeu
+- **Regulação financeira:** regulação financeira, lei das estatais, open finance
+
+### Grupo C — Geopolítica com Impacto Material
+
+Conservador por design — apenas termos com spillover econômico/mercado claro.
+
+- Conflitos: guerra, conflito internacional, crise institucional
+- Sanções/embargos: sanções, sanções econômicas, embargo
+- Logística/oferta: bloqueio logístico, choque de oferta, greve
+- **Comércio (V3.2):** tarifas comerciais, guerra comercial, barreira comercial
+
+### Grupo D — Tecnologia Estratégica (NOVO em V3.2)
+
+Captura tech com relevância clara para investimento/negócios. Exclui termos genéricos ("internet", "app") para evitar drift para consumer-tech/lifestyle.
+
+- **Players AI:** OpenAI, ChatGPT, Anthropic, Claude, Gemini, Google DeepMind
+- **Big tech:** Nvidia (NVDA), Microsoft (MSFT) / Azure, Alphabet (GOOGL) / Google Cloud, Meta Platforms / Meta AI, Apple (AAPL), Amazon Web Services (AWS)
+- **Semicondutores:** semicondutor, chips, TSMC, ASML
+- **Conceitos com peso de negócio:** inteligência artificial, IA generativa, computação em nuvem, cibersegurança, transformação digital, big tech
+
+### Fallback `relevant` — Sinal de Impacto + Anti-Noise
+
+Quando nenhum grupo explícito bate, o gate ainda admite o item se **ambas** as condições forem verdadeiras:
+
+```python
+def _has_relevance_signal(text: str) -> bool:
+    return (
+        bool(_MARKET_IMPACT_RE.search(text))
+        or bool(_ECONOMIC_IMPACT_RE.search(text))
+        or bool(_POLICY_IMPACT_RE.search(text))
+        or bool(_STRONG_SIGNAL_RE.search(text))
+    )
+
+if _has_relevance_signal(text) and not _NOISE_RE.search(text):
+    return True, "fallback_relevant"
+```
+
+**Por que é seguro:**
+
+- Os 4 patterns importados de `news_classifier.py` são curados (linguagem financeira/política específica) — match único é evidência forte de conteúdo in-domain.
+- O check `_NOISE_RE` antes do return garante que clickbait/promo com termo de impacto ("Veja como esta crise vai mudar tudo") seja barrado mesmo carregando "crise".
+- Acoplamento leve com classifier (import dos `_*_RE` privados) — aceito por reuso vs duplicação.
+
+**Por que não vaza generalismo:**
+
+- Lifestyle/esporte/entretenimento sem termo financeiro continuam fora — não há sinal de impacto a detectar.
+- Score downstream ainda filtra: o item entra na classificação, mas precisa pontuar para chegar à curadoria.
+
+---
+
+## 5.6. Contadores do Pipeline (V3.1 + V3.2)
+
+Cada execução de `summarize_news()` emite uma linha de log via `log_action(logger, "summarize_news", **counters)`. Os 12 contadores cobrem o funil completo:
+
+| Contador | Camada de origem | O que mede |
+|---|---|---|
+| `raw_total` | Layer 0 (RSSClient) | Total bruto de artigos retornados pelos feeds |
+| `fetched_today` | Layer 1 (date gate) | Artigos publicados hoje (BRT) — sobreviventes do date gate |
+| `low_quality` | Layer 2 (quality gate) | Descartados por listicle/clickbait/título curto/promo sem contexto |
+| `scope_dropped` | Layer 3 (scope gate) | Fora de A/B/C/D e sem sinal de impacto |
+| `scope_pass_tracked_asset` | Layer 3 | Admitidos pelo Grupo A |
+| `scope_pass_macro` | Layer 3 | Admitidos pelo Grupo B |
+| `scope_pass_geopolitical` | Layer 3 | Admitidos pelo Grupo C |
+| `scope_pass_strategic` | Layer 3 | Admitidos pelo Grupo D |
+| `scope_fallback_relevant` | Layer 3 | Admitidos via fallback de impacto |
+| `dedup_removed` | Layer 6 | Removidos pelo dedup exato (título normalizado) |
+| `simhash_dropped` | Layer 7 | Removidos pelo near-dup (Hamming ≤ 10) |
+| `curated` / `final_total` | Layer 9-10 | Itens finais retornados em `items[]` |
+| `high` / `medium` / `low` | Layer 9-10 | Distribuição de prioridade no curated |
+| `noise` | Layer 5 | Itens com `category="ruido"` (auditoria, em `by_category`) |
+
+**Equação do funil:**
+
+```
+raw_total
+  → (raw_total - fetched_today)         = não-hoje
+  → (fetched_today - low_quality - scope_dropped)
+                                         = entrou na classificação
+  → (… - dedup_removed - simhash_dropped - noise)
+                                         = pool ranking
+  → curated (final_total)                = exposto no items[]
+                                           = high + medium + low
+```
+
+**Como interpretar em uso real:**
+
+| Sinal | Interpretação |
+|---|---|
+| `final_total` consistentemente 0 | scope gate cortando demais ou feeds sem `published` (date gate fail-closed) |
+| `scope_fallback_relevant` ≫ soma dos `scope_pass_*` | gate permissivo demais — revisar grupos explícitos |
+| `scope_dropped` muito alto (>80%) | feeds genéricos demais para o domínio do Atlas |
+| `simhash_dropped` alto | feeds redundantes ou threshold (10) baixo demais |
+| `low` preenchendo via fallback de curadoria | dia seco — radar populado por V3.1 fallback |
+
+---
+
+## 5.7. Comportamento Atual (V3.1 + V3.2)
+
+**Fallback HIGH → MEDIUM → LOW na curadoria:**
+
+`_curate_top5()` retorna até 5 itens em ordem de prioridade:
+
+1. Até 3 itens HIGH (cap rígido)
+2. MEDIUM até completar 5 vagas
+3. LOW como preenchimento se ainda houver vagas (V3.1)
+
+**Garantia operacional:** o radar nunca aparece vazio quando o pool ranqueado contém itens válidos (não-noise, in-scope). Em dias secos sem HIGH/MEDIUM, o usuário ainda recebe os melhores LOW disponíveis — auditados como "Outras relevantes: N" no summary.
+
+**Coerência briefing × menu `/news`:**
+
+Briefing (`BriefingService.run_daily_briefing`) e menu `/news` (orchestrator `_handle_news`) chamam o **mesmo** `summarize_news()` e iteram o mesmo `items[]`. Não há divergência de lógica — divergências observáveis em runs diferentes refletem horário (date gate de hoje BRT) ou cache de feed.
+
+**Ícones do Telegram alinhados:**
+
+| Prioridade | Ícone | Aplicado em |
+|---|---|---|
+| `high` | 🔴 | `format_briefing_blocks`, `send_news_items_with_feedback` |
+| `medium` | 🟡 | idem |
+| `low` | ⚪ | idem (V3.1) |
 
 ---
 
@@ -584,10 +832,13 @@ O modelo segue separação limpa entre o que classificar (classifier), como proc
 - First-seen heuristic: quando near-duplicates são detectados, o item mais antigo na ordem de chegada é mantido, independente do score. O ranking posterior reordena por qualidade, mitigando o impacto.
 - Complexidade O(n²) na comparação de hashes — aceitável para volume atual (< 200 itens/dia após gates upstream). Monitorar se volume crescer acima de ~1.000 itens/sessão.
 
-### Scope Gate
+### Scope Gate (atualizado em V3.2)
 
-- `"vale"` (bare term) no Grupo A pode gerar falsos positivos em feeds não-financeiros ("vale transporte", "vale alimentação"). Aceito porque os feeds do Atlas são fontes financeiras. Mitigation futura: usar `"vale3"` como único match não-ambíguo ou adicionar negative lookahead.
+- `"vale"` (bare term) no Grupo A pode gerar falsos positivos em feeds não-financeiros ("vale transporte", "vale alimentação"). Aceito porque os feeds do Atlas são fontes financeiras. Mitigação futura: usar `"vale3"` como único match não-ambíguo ou adicionar negative lookahead.
 - `"guerra"` e `"greve"` são termos amplos: "guerra de preços" ou "greve de professores" (sem impacto de mercado) passariam no gate. Trade-off intencional: falsos negativos (drops indevidos de notícias relevantes) são mais custosos que falsos positivos no briefing de mercado.
+- **Termos amplos no Grupo D (V3.2):** "microsoft", "apple", "google", "meta" podem capturar notícias de produto consumer (não-investidor). Mitigação: o score downstream (`compute_quality_score`) e os thresholds de prioridade ainda filtram conteúdo de baixo valor; itens irrelevantes tendem a ficar como LOW e só entram na curadoria via fallback (V3.1) em dias secos.
+- **Dependência de heurística textual:** scope gate é puramente keyword-based. Notícia escrita com vocabulário fora dos grupos e sem sinal de impacto cai como `scope_dropped`, mesmo se semanticamente relevante. Sem embeddings/semantic search — limitação aceita para Fase 1.
+- **Acoplamento leve com `news_classifier.py`:** o fallback `relevant` importa diretamente os patterns privados `_MARKET_IMPACT_RE`, `_ECONOMIC_IMPACT_RE`, `_POLICY_IMPACT_RE`, `_STRONG_SIGNAL_RE`, `_NOISE_RE`. Reuso pragmático (zero duplicação) com risco aceito: se o classifier renomear/remover esses símbolos, o scope gate quebrará. Mitigado por: (1) testes em `tests/test_news_scope.py` falhando rápido, (2) decisão arquitetural deliberada de reuso vs duplicação documentada.
 
 ### Score
 
@@ -695,25 +946,27 @@ Os cinco pontos de extensão estão marcados com `TODO: [V4]` no código nos loc
 
 | Dimensão | Avaliação |
 |---|---|
-| **Ciclo** | V4 — Baseline Determinístico Avançado |
-| **Maturidade** | Médio-alto — funcional, não calibrado |
-| **Pronto para uso real** | **Sim** |
+| **Ciclo** | V3.2 — Calibração do Scope Gate (sobre baseline V4) |
+| **Maturidade** | Médio-alto — funcional, em calibração com uso real |
+| **Pronto para uso real** | **Sim — uso real controlado** |
 | **Nível de risco operacional** | Baixo |
-| **Calibração de produção** | Pendente — requer uso real |
+| **Calibração de produção** | Em andamento — V3.1 e V3.2 endereçaram os dois efeitos observados |
 
 **Justificativa:**
 
-O sistema é funcionalmente correto, determinístico e resiliente. Pipeline de 11 layers com responsabilidades isoladas. Contratos públicos e schemas Pydantic inalterados ao longo de todo o ciclo V1–V4. O `BriefingService` continua funcionando sem qualquer modificação. Audits técnicos executados em cada fase — nenhuma regressão detectada.
+O sistema é funcionalmente correto, determinístico e resiliente. Pipeline de 11 layers com responsabilidades isoladas. Contratos públicos e schemas Pydantic inalterados ao longo de todo o ciclo V1–V3.2. O `BriefingService` continua funcionando sem qualquer modificação. Audits técnicos executados em cada fase — nenhuma regressão detectada (437/437 testes passam após V3.2).
 
-A maturidade é "médio-alto" e não "alto" por três razões deliberadas: (1) os pesos e thresholds do classificador foram definidos por julgamento, não por observação de dados reais; (2) o threshold do SimHash (10 bits) é conservador e não calibrado; (3) o scope gate pode precisar de ajuste fino nos termos do Grupo A ("vale") após validação com feeds reais.
+A maturidade é "médio-alto" e não "alto" porque: (1) os pesos e thresholds do classificador foram definidos por julgamento, não por observação prolongada de dados reais; (2) o threshold do SimHash (10 bits) é conservador e ainda não calibrado; (3) o scope gate, embora calibrado em V3.2, ainda contém termos amplos de mitigação conhecida ("vale" bare, "microsoft"/"apple" no Grupo D) que dependem do score downstream para evitar drift.
 
-O risco operacional é baixo: todos os casos de erro têm fallback explícito, o pior cenário de falha (feed RSS indisponível, artigo com encoding incomum) está coberto, e o SimHash gate opera de forma stateless — falha em um fingerprint não afeta os demais.
+O risco operacional é baixo: todos os casos de erro têm fallback explícito, o pior cenário de falha (feed RSS indisponível, artigo com encoding incomum) está coberto, e o SimHash gate opera de forma stateless — falha em um fingerprint não afeta os demais. As calibrações V3.1/V3.2 reduziram dois riscos operacionais concretos: radar vazio (V3.1) e recall baixo no scope gate (V3.2).
 
-**Esta fase está consolidada.** Ajustes futuros dependem de uso real e coleta de evidências. O módulo de email não faz parte desta fase.
+**Esta fase está consolidada.** Ajustes futuros dependem de uso real e coleta de evidências via os 12 contadores do funil.
 
 **Próximos passos recomendados:**
 
-1. Uso real controlado — observar `scope_dropped`, `simhash_dropped` e `curated` nos logs de `summarize_news`.
-2. Calibração do threshold SimHash — se near-duplicates semânticos chegam ao briefing, elevar threshold de 10 para ~14–18 e medir impacto em falsos positivos.
-3. Refinamento do Grupo A — avaliar se "vale" (bare term) gera falsos positivos observáveis; substituir por "vale3" + "vale s.a." se necessário.
-4. Calibração de scores — ajustar pesos com base na distribuição real de `high/medium/low` observada.
+1. **Uso real controlado** — observar os 12 contadores em `log_action("summarize_news", …)` por execução. Foco em `scope_pass_*`, `scope_fallback_relevant`, `scope_dropped`, `final_total`, `high/medium/low`.
+2. **Calibração do scope gate** — se `scope_fallback_relevant` ultrapassar consistentemente o volume dos `scope_pass_*` explícitos, revisar se algum termo deveria estar nos grupos. Se `scope_dropped` permanecer alto (>80%), avaliar afrouxamento adicional.
+3. **Calibração do threshold SimHash** — se near-duplicates semânticos chegam ao briefing, elevar threshold de 10 para ~14–18 e medir impacto em falsos positivos.
+4. **Refinamento do Grupo A** — avaliar se "vale" (bare term) gera falsos positivos observáveis; substituir por "vale3" + "vale s.a." se necessário.
+5. **Refinamento do Grupo D** — avaliar se termos amplos ("microsoft", "apple") capturam consumer-tech relevante; restringir para ticker/produto se necessário.
+6. **Calibração de scores** — ajustar pesos e thresholds (`SCORE_THRESHOLD_HIGH=8`, `MEDIUM=4`) com base na distribuição real de `high/medium/low` observada.

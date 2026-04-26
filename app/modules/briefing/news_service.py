@@ -24,6 +24,8 @@ from email.utils import parsedate_to_datetime as _parsedate
 
 from app.core.logging import get_logger, log_action
 from app.integrations.news_classifier import (
+    SCORE_THRESHOLD_HIGH,
+    SCORE_THRESHOLD_MEDIUM,
     classify_news,
     compute_quality_score,
     is_low_quality,
@@ -120,14 +122,17 @@ def _build_item(article, normalized_text: str) -> dict:
 # ── Pipeline: curation helpers ────────────────────────────────────────────────
 
 def _curate_top5(items: list[dict]) -> list[dict]:
-    """Select up to 5 items: max 3 high-priority, remainder medium. Low items discarded.
+    """Select up to 5 items in priority order: HIGH (cap 3) → MEDIUM → LOW (fallback).
 
-    Assumes items are already sorted by score DESC so within each tier
-    the highest-scoring articles are chosen first.
+    Assumes items are already sorted by score DESC so within each tier the
+    highest-scoring articles are chosen first. LOW items only enter when HIGH
+    and MEDIUM under-fill the slate, so the radar is never empty when the pool
+    contains valid (non-noise, in-scope) items.
     """
     high = [i for i in items if i["priority"] == "high"][:3]
     medium = [i for i in items if i["priority"] == "medium"]
-    return (high + medium)[:5]
+    low = [i for i in items if i["priority"] == "low"]
+    return (high + medium + low)[:5]
 
 
 def _deduplicate_items(items: list[dict]) -> list[dict]:
@@ -217,13 +222,122 @@ _CATEGORY_LABELS: dict[str, str] = {
 }
 
 
+def _derive_adjusted_priority(score: float) -> str:
+    """Re-derive priority from an adjusted (float) score.
+
+    Uses the same thresholds as the upstream classifier so that a score that
+    crosses a boundary after a memory adjustment is correctly re-labelled.
+    Called only when adjustment != 0 — base priority from classify_news is
+    preserved as-is for items with no feedback.
+    """
+    if score >= SCORE_THRESHOLD_HIGH:
+        return "high"
+    if score >= SCORE_THRESHOLD_MEDIUM:
+        return "medium"
+    return "low"
+
+
+def _apply_memory_adjustments(items: list[dict]) -> list[dict]:
+    """Inject feedback-derived adjustments into each item. Fail-safe — never raises.
+
+    For each item, computes a memory adjustment from stored user feedback on
+    (source="news", reference_id=to_callback_ref(link or title)). Mutates the
+    item in place to add three internal (`_`-prefixed) fields:
+
+      _base_score        — float copy of the classifier score (immutable origin)
+      _memory_adjustment — feedback-derived delta (positive +1 / important +2 /
+                           negative -2 / 0.0 otherwise)
+      _memory_reason     — feedback label that produced the delta, or None
+
+    The public `score` field is overwritten with the float final_score so that
+    downstream ranking and any callback that reads `item["score"]` see the
+    adjusted value. Internal fields are stripped before serialization (Layer 11).
+
+    Per-item DEBUG when adjustment != 0; one INFO line summarizing per batch.
+    Any failure (DB down, missing helpers) leaves items neutral — pipeline
+    continues unchanged.
+    """
+    if not items:
+        return items
+    try:
+        from app.db.session import SessionLocal
+        from app.modules.memory.scoring import compute_memory_adjustment
+        from app.modules.memory.utils import to_callback_ref
+    except Exception as exc:
+        logger.warning("AdaptiveScore: imports falharam (news): %s", exc)
+        for item in items:
+            item.setdefault("_base_score", float(item.get("score", 0)))
+            item.setdefault("_memory_adjustment", 0.0)
+            item.setdefault("_memory_reason", None)
+        return items
+
+    applied = 0
+    db = None
+    try:
+        db = SessionLocal()
+        for item in items:
+            base = float(item.get("score", 0))
+            item["_base_score"] = base
+            item["_memory_adjustment"] = 0.0
+            item["_memory_reason"] = None
+            try:
+                raw = item.get("link") or item.get("title", "") or ""
+                ref = to_callback_ref(raw) if raw else ""
+                if not ref:
+                    continue
+                adj = compute_memory_adjustment(
+                    "news", ref, base, db_session=db
+                )
+                if adj.adjustment == 0.0:
+                    continue
+                item["_memory_adjustment"] = adj.adjustment
+                item["_memory_reason"] = adj.reason
+                # Overwrite the public score and re-derive priority so that
+                # items crossing a threshold boundary after feedback are
+                # correctly bucketed by _curate_top5 and counted in the summary.
+                item["score"] = base + adj.adjustment
+                item["priority"] = _derive_adjusted_priority(item["score"])
+                applied += 1
+                sign = "+" if adj.adjustment > 0 else ""
+                logger.debug(
+                    "[AdaptiveScore] src=news ref=%s base=%.1f adj=%s%.1f final=%.1f",
+                    ref, base, sign, adj.adjustment, item["score"],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "AdaptiveScore: falha por item (news ref=%s): %s",
+                    item.get("link") or item.get("title", "?"), exc,
+                )
+                continue
+    except Exception as exc:
+        logger.warning("AdaptiveScore: sessão DB falhou (news): %s", exc)
+        for item in items:
+            item.setdefault("_base_score", float(item.get("score", 0)))
+            item.setdefault("_memory_adjustment", 0.0)
+            item.setdefault("_memory_reason", None)
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:  # pragma: no cover — defensive
+                pass
+
+    if applied:
+        logger.info(
+            "Applied adaptive scoring to %d/%d items (News)", applied, len(items)
+        )
+    return items
+
+
 def _rank_items(items: list[dict]) -> list[dict]:
     """Sort by final_score = score + quality_score*2, then published DESC.
 
-    quality_score is computed inline and never stored on the item — contract unchanged.
-    Score remains dominant; quality_score refines ordering within score ties.
+    `score` here already includes the adaptive memory adjustment (see
+    _apply_memory_adjustments). quality_score is computed inline and never
+    stored on the item — contract unchanged. Score remains dominant;
+    quality_score refines ordering within score ties.
     """
-    def _key(item: dict) -> tuple[int, datetime]:
+    def _key(item: dict) -> tuple[float, datetime]:
         qs = compute_quality_score(item["title"], item.get("summary", ""))
         return (item["score"] + qs * 2, _parse_published(item.get("published") or ""))
 
@@ -308,6 +422,10 @@ def _log_ranked_news(curated: list[dict]) -> None:
                         "title": item.get("title", ""),
                         "category": item.get("category", ""),
                         "reason": item.get("score_reasons", []),
+                        # Preserve the deterministic classifier score so future
+                        # analytics can distinguish the base score from the
+                        # feedback-adjusted score stored in the top-level score field.
+                        "base_score": item.get("_base_score"),
                     },
                     score=float(item["score"]) if item.get("score") is not None else None,
                 )
@@ -360,10 +478,20 @@ class NewsService:
           summary      — Telegram-aware one-liner (no titles — BriefingService renders items separately)
         """
         articles = self.client.fetch_all()
+        raw_total = len(articles)
         all_items: list[dict] = []
         total_fetched_today = 0
         low_quality_count = 0
         scope_dropped_count = 0
+        # Per-reason scope counters (V3.2) — auditable why each item passed.
+        # Keys mirror the reasons returned by evaluate_scope.
+        scope_reasons_count: dict[str, int] = {
+            "tracked_asset": 0,
+            "macro": 0,
+            "geopolitical": 0,
+            "strategic": 0,
+            "fallback_relevant": 0,
+        }
 
         # ── Layer 1: Date gate ────────────────────────────────────────────────
         # ── Layer 2: Quality gate ─────────────────────────────────────────────
@@ -383,6 +511,8 @@ class NewsService:
             if not in_scope:
                 scope_dropped_count += 1
                 continue
+            if scope_reason in scope_reasons_count:
+                scope_reasons_count[scope_reason] += 1
 
             # ── Layer 4: Classification ───────────────────────────────────────
             item = _build_item(a, normalized_text)
@@ -395,11 +525,19 @@ class NewsService:
 
         # ── Layer 6: Exact dedup ─────────────────────────────────────────────
         deduped = _deduplicate_items(valid_items)
+        exact_dedup_removed = len(valid_items) - len(deduped)
         # TODO: [V4] detect trending topics across deduplicated items using clustering
 
         # ── Layer 7: Near-duplicate gate (SimHash) ────────────────────────────
         near_deduped = _filter_near_duplicates(deduped)
         simhash_dropped_count = len(deduped) - len(near_deduped)
+
+        # ── Layer 7.5: Adaptive memory adjustment (Etapa 3B) ─────────────────
+        # Apply BEFORE ranking so that feedback-driven boosts/penalties affect
+        # both the rank order and the curation cutoff. Fail-safe — neutral on
+        # any error. Mutates items in place with _base_score / _memory_adjustment
+        # / _memory_reason and overwrites item["score"] when adjustment != 0.
+        _apply_memory_adjustments(near_deduped)
 
         # ── Layer 8: Ranking ──────────────────────────────────────────────────
         ranked = _rank_items(near_deduped)
@@ -431,18 +569,24 @@ class NewsService:
 
         high_count = sum(1 for i in curated if i["priority"] == "high")
         medium_count = sum(1 for i in curated if i["priority"] == "medium")
+        low_count = sum(1 for i in curated if i["priority"] == "low")
         noise_removed = low_quality_count + len(noise_items)
         focus_topics = _infer_focus(curated)
 
         # Step 10: Telegram-aware summary — NO titles here; BriefingService iterates items[]
+        # "Outras relevantes" line is rendered only when LOW fallback actually engaged,
+        # so the summary stays compact when HIGH/MEDIUM filled the slate.
         focus_lines = "\n".join(f"• {t}" for t in focus_topics) if focus_topics else "• Geral"
-        summary = (
-            f"📰 Radar de Noticias\n\n"
-            f"Foco do dia:\n{focus_lines}\n\n"
-            f"Alta prioridade: {high_count}\n"
-            f"Media prioridade: {medium_count}\n"
-            f"Ruidos removidos: {noise_removed}"
-        )
+        summary_lines = [
+            "📰 Radar de Noticias\n",
+            f"Foco do dia:\n{focus_lines}\n",
+            f"Alta prioridade: {high_count}",
+            f"Media prioridade: {medium_count}",
+        ]
+        if low_count:
+            summary_lines.append(f"Outras relevantes: {low_count}")
+        summary_lines.append(f"Ruidos removidos: {noise_removed}")
+        summary = "\n".join(summary_lines)
 
         result = {
             "total": len(curated),
@@ -454,13 +598,23 @@ class NewsService:
 
         log_action(
             logger, "summarize_news",
+            raw_total=raw_total,
             fetched_today=total_fetched_today,
             low_quality=low_quality_count,
             scope_dropped=scope_dropped_count,
+            scope_pass_tracked_asset=scope_reasons_count["tracked_asset"],
+            scope_pass_macro=scope_reasons_count["macro"],
+            scope_pass_geopolitical=scope_reasons_count["geopolitical"],
+            scope_pass_strategic=scope_reasons_count["strategic"],
+            scope_fallback_relevant=scope_reasons_count["fallback_relevant"],
+            dedup_removed=exact_dedup_removed,
             simhash_dropped=simhash_dropped_count,
             curated=len(curated),
             high=high_count,
+            medium=medium_count,
+            low=low_count,
             noise=len(noise_items),
+            final_total=len(curated),
         )
         return result
 

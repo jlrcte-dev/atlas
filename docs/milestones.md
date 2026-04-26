@@ -1,6 +1,6 @@
 # Atlas AI Assistant — Milestones do Projeto
 
-> Documento de referência estratégica. Última atualização: Abril 2026.
+> Documento de referência estratégica. Última atualização: Abril 2026 (pós-V3.2).
 
 ---
 
@@ -91,15 +91,53 @@ Fase de consolidação do motor determinístico antes de qualquer integração c
 
 *Isolamento de campos internos:* itens carregam campos `_`-prefixados durante o pipeline (`_normalized_text`, `_scope_gate_reason_internal`, `_simhash`, `_internal_score`, etc.). Todos removidos pela função `_strip_internal_fields()` antes da serialização — contratos públicos e schemas Pydantic inalterados.
 
+**V3.1 — Fallback de Curadoria + Contadores + Alinhamento Telegram** *(post-V4; calibração mínima sobre o baseline)*
+
+Calibração introduzida após V4 para corrigir efeito observado em uso real: dias com poucos sinais geravam apenas 0–2 itens no menu `/news` e no briefing.
+
+*Fallback de curadoria HIGH → MEDIUM → LOW:* `_curate_top5()` em `news_service.py` passou a aceitar itens `low` como preenchimento quando `high + medium` não atingem o limite de 5. Ordem de prioridade preservada: HIGH (cap 3) → MEDIUM → LOW (fallback). LOW só entra após `high + medium` se houver vagas restantes; nunca antes. O radar deixou de aparecer vazio quando há itens válidos no pool.
+
+*Contadores completos no `log_action`:* expostos `raw_total`, `dedup_removed`, `medium_count`, `low_count`, `final_total` além dos já existentes (`fetched_today`, `low_quality`, `scope_dropped`, `simhash_dropped`, `curated`, `high`, `noise`). Auditoria do funil completa em uma linha de log.
+
+*Summary do Telegram com nova linha condicional:* "Outras relevantes: N" aparece em `news["summary"]` apenas quando o fallback LOW preenche slots — summary permanece compacto quando HIGH/MEDIUM cobrem o radar.
+
+*Alinhamento Telegram:* `format_briefing_blocks()` e `send_news_items_with_feedback()` em `telegram_bot.py` passaram a usar mapping explícito `{high: 🔴, medium: 🟡, low: ⚪}` para cobrir a nova prioridade. Briefing e menu `/news` consomem o mesmo payload de `summarize_news()` — não há divergência de lógica entre os dois fluxos.
+
+*Garantia de não-regressão:* contrato de `summarize_news()` preservado (mesmas chaves, mesmos tipos). `total` permanece bounded em ≤ 5.
+
+**V3.2 — Calibração do Scope Gate (`evaluate_scope`)** *(post-V4; calibração de recall)*
+
+Refinamento focado no scope gate, identificado como o filtro mais agressivo do pipeline após V3.1. Notícias relevantes (bolsa, ações, lucro, IA, big tech, reforma tributária) caíam fora do gate antes mesmo de serem classificadas.
+
+*Reestruturação dos grupos em `tracked_scope.py`:*
+
+- **Grupo A — ativos monitorados + setor:** mantém Petrobras/Vale/Ambev/Itaúsa/Ibovespa e expande para os principais bancos (Itaú, Bradesco, BB, Santander, BTG), Eletrobras, varejo (Magalu, Renner, Via), aéreas (Azul, Gol), siderurgia/mineração (CSN, Usiminas, Gerdau), proteína (JBS, Marfrig, BRF) e telecom (Vivo).
+- **Grupo B — macro / mercado / commodities:** expandido com termos de bolsa (`bolsa`, `ações`, `b3`, `ipo`, `dividendos`, `fii`), commodities (`soja`, `milho`, `café`, `ouro`), indicadores faltantes (`pib`, `igpm`, `desemprego`, `recessão`, `deflação`, `balança comercial`), reforma tributária/previdência, instituições (Receita Federal, BNDES, CVM, FMI, OCDE, Fed) e regulação financeira.
+- **Grupo C — geopolítica:** adicionados `tarifas comerciais`, `guerra comercial`, `barreira comercial`.
+- **Grupo D — tecnologia estratégica (NOVO):** OpenAI, Anthropic, Claude, Gemini, Nvidia, Microsoft/Azure, Alphabet/Google Cloud, Meta, Apple, AWS, semicondutores, TSMC, ASML, IA generativa, cloud computing, cibersegurança, big tech.
+
+*Fallback `relevant` controlado:* quando nenhum grupo bate, `evaluate_scope` admite o item se ele carregar pelo menos um sinal de impacto (reusa `_MARKET_IMPACT_RE`, `_ECONOMIC_IMPACT_RE`, `_POLICY_IMPACT_RE`, `_STRONG_SIGNAL_RE` do classifier) **e** não bater em `_NOISE_RE`. O fallback é determinístico, auditável (`reason="fallback_relevant"`) e fail-fast contra ruído.
+
+*Contadores `scope_pass_*` no `log_action`:* `scope_pass_tracked_asset`, `scope_pass_macro`, `scope_pass_geopolitical`, `scope_pass_strategic`, `scope_fallback_relevant`, `scope_dropped`. O log do funil agora mostra **por qual razão** cada item passou — visibilidade completa de recall.
+
+*Reuso de patterns do classifier:* o scope gate importa diretamente os patterns compilados de `news_classifier.py` para o fallback. Acoplamento leve aceito por reuso vs duplicação. Zero dependência nova; zero refator de arquitetura.
+
+*Cobertura de testes:* arquivo dedicado `tests/test_news_scope.py` com 21 testes — positivos por grupo (Petrobras, Bradesco, Magalu, bolsa, petróleo, reforma tributária, PIB, guerra, tarifas, Nvidia, OpenAI, cibersegurança), fallback (default, decreto), negativos (atriz, esporte, filme, meditação), anti-noise no fallback (clickbait com "crise", promo com "crise") e contrato de `summarize_news()` preservado.
+
+*Recall esperado:* notícias antes silenciosamente descartadas (lucro de bancos, big tech, IA estratégica, reforma tributária, política econômica) agora chegam à classificação e disputam um lugar na curadoria via score. Precisão preservada por anti-noise + score downstream.
+
 **Capacidades atuais:**
 
 - Classificação de artigos em 8 categorias funcionais
 - 7 flags operacionais por artigo (impacto em mercado, economia, política, sinal forte, números, duplicata, ruído)
 - Score determinístico e auditável com `score_reasons`
+- Scope gate determinístico em 4 grupos (A/B/C/D) + fallback `relevant` por sinais de impacto, com 5 razões auditáveis
 - Filtragem de ruído antes do score
-- Deduplicação por título normalizado entre feeds
-- Ordenação por relevância (score + recência)
-- Summary com contagem de itens de alta prioridade
+- Deduplicação por título normalizado entre feeds + near-dup via SimHash
+- Ordenação por relevância (`score + quality_score*2`, depois `published DESC`)
+- Curadoria com fallback HIGH → MEDIUM → LOW: o radar nunca aparece vazio quando há itens válidos
+- Contadores completos do funil (12 métricas em `log_action`) para auditoria de recall e precisão
+- Telegram alinhado: briefing e menu `/news` consomem o mesmo payload, com ícones diferenciados por prioridade
 - Fallback robusto em todos os pontos de falha
 
 ---
@@ -110,15 +148,16 @@ Fase de consolidação do motor determinístico antes de qualquer integração c
 |---|---|---|
 | RSS Client (fetch) | Estável | Sim |
 | News Classifier | Estável (V3) | Sim |
-| News Service | Estável (V3) | Sim |
+| News Service | Estável (V3.2) | **Sim — uso real controlado** |
+| Scope Gate | Estável (V3.2) | **Sim — uso real controlado** |
 | Email Classifier | Estável (V2) | Sim |
 | Inbox Service | Estável (V2) | Sim |
 | Briefing Service | Estável | Sim |
 | Finance Module | Estável (v1.1) | Sim |
 
-O sistema está funcional e foi submetido a audit técnico pré-produção em Abril 2026. O único ajuste blocker identificado (`"desconto"` em `_NOISE`) foi aplicado imediatamente.
+O sistema está em **uso real controlado**. As calibrações V3.1 e V3.2 endereçaram os dois efeitos observados em produção: (1) curadoria descartando LOW silenciosamente e (2) scope gate cortando notícias relevantes antes da classificação. Os 12 contadores em `log_action` permitem monitorar precisão e recall por execução.
 
-**Uso real recomendado:** controlado, com monitoramento ativo nos primeiros dias para validar calibração de score e proporção de itens `high/alta`.
+**Uso real recomendado:** controlado, com observação ativa dos contadores `scope_*` e `final_total` para confirmar que o radar está populado consistentemente e que `scope_fallback_relevant` não ultrapassa o volume dos grupos explícitos (sinal de gate permissivo demais).
 
 ---
 
@@ -286,6 +325,109 @@ A assinatura foi estendida com kwargs opcionais `source` e `event_type` para des
 
 ---
 
+### Adaptive Score Engine v1 (Fase 2A · Etapa 3A)
+
+**Objetivo:** primeira camada de inteligência adaptativa — ler feedbacks registrados e retornar um ajuste de score determinístico, sem alterar nenhum outro módulo.
+
+**Arquivo:** `app/modules/memory/scoring.py`
+
+**Contrato público:**
+
+```python
+@dataclass
+class MemoryAdjustment:
+    adjustment: float       # delta a aplicar ao score base
+    reason: Optional[str]   # feedback label ("positive"/"important"/"negative") ou None
+
+def compute_memory_adjustment(
+    source: str,
+    reference_id: str,
+    base_score: float,
+    *,
+    db_session: Session,
+) -> MemoryAdjustment: ...
+```
+
+**Tabela de ajustes:**
+
+| Feedback | Ajuste |
+|---|---|
+| `positive` | +1.0 |
+| `important` | +2.0 |
+| `negative` | −2.0 |
+| sem evento / sem feedback / desconhecido | 0.0 (neutro) |
+
+**Propriedades:**
+
+- **Determinístico:** mesma entrada → mesma saída.
+- **Read-only:** nunca escreve no banco.
+- **Fail-safe:** qualquer exceção retorna `MemoryAdjustment(0.0, None)` — nunca propaga ao chamador.
+- **Isolado:** nenhum módulo existente foi alterado nesta etapa.
+- **`base_score` forward-compatible:** aceito na assinatura para escala/clamp em v2, mas não utilizado em v1.
+- **Lookup por `(source, reference_id)`:** sem filtro por `event_type` — compatível com todos os tipos de evento registrados no Memory Module.
+
+**Cobertura de testes:** 10 testes em `tests/test_memory_adaptive_scoring.py` (neutro, positive, important, negative, valor desconhecido, source isolation, inputs vazios, DB error fail-safe, determinismo com base_score variável).
+
+---
+
+### Adaptive Score Integration v1 (Fase 2A · Etapa 3B)
+
+**Objetivo:** aplicar o ajuste do motor adaptativo ao ranking real de Inbox e News, antes da ordenação final e da curadoria. `final_score = base_score + memory_adjustment`.
+
+**Princípio de integração:** aplicar *depois* da classificação e *antes* da ordenação final, em ambos os pipelines. Fail-safe em três camadas por pipeline. Contratos públicos intactos.
+
+**Inbox — `app/modules/inbox/service.py`:**
+
+- Novo dataclass interno `InboxAdjustment(base, adjustment, reason, final)` — nunca serializado para a API.
+- Novo helper `_compute_email_adjustments(emails, classifications) -> dict[email_id, InboxAdjustment]`:
+  - Abre sessão DB out-of-band (mesmo padrão de `_log_email_classifications`).
+  - Usa `to_callback_ref(email.id)` para gerar o `reference_id` — idêntico ao usado no logging → sem mismatch.
+  - Chamado em `summarize_emails` após `_classify_all` e antes das ordenações.
+- Ordenação de `action_emails` e ranking de `top5` usam `effective_score = base + adjustment` como chave, em vez de `clf.score` puro.
+- `EmailClassification.score` (tipo `int`) nunca é mutado.
+
+**News — `app/modules/briefing/news_service.py`:**
+
+- Novo helper `_derive_adjusted_priority(score: float) -> str` — usa os mesmos thresholds `SCORE_THRESHOLD_HIGH/MEDIUM` do classifier.
+- Novo helper `_apply_memory_adjustments(items) -> list[dict]`:
+  - Layer 7.5 do pipeline — posicionado após dedup/SimHash e **antes** de `_rank_items`, `_curate_top5` e `_diversify`.
+  - Mutação in-place em cada item: `_base_score`, `_memory_adjustment`, `_memory_reason` (campos `_`-prefixados, auto-stripped na Layer 11 por `_strip_internal_fields`).
+  - Quando `adj != 0.0`: sobrescreve `item["score"]` com o score ajustado (float) **e** recalcula `item["priority"]` via `_derive_adjusted_priority` — garante que itens que cruzam o threshold (e.g., medium → high) sejam corretamente bucketizados por `_curate_top5`.
+- `_log_ranked_news` preserva `base_score` no payload: `"base_score": item.get("_base_score")` — distingue o score determinístico do classificador do score ajustado pelo feedback para analytics futuras.
+
+**Fail-safe (ambos os pipelines) — três camadas:**
+
+1. Imports lazy (`from app.db.session import SessionLocal`, etc.) em try/except — se imports falharem, pipeline continua neutro.
+2. Try/except por item — falha em um item não aborta o batch; item fica com `adjustment=0.0`.
+3. Try/except de sessão DB — se `SessionLocal()` falhar, fill neutro para todos os itens restantes.
+
+**Observabilidade:**
+
+- Log DEBUG por item quando `adjustment != 0.0`: `[AdaptiveScore] src=<src> ref=<ref> base=<X> adj=±<Y> final=<Z>`
+- Log INFO por batch quando há ajuste: `Applied adaptive scoring to X/Y items (Inbox|News)`
+- Nenhum dado sensível (payload, corpo do email) nos logs.
+- Sem log quando todos os itens são neutros — não polui execuções sem feedback.
+
+**Cobertura de testes:** 17 testes em `tests/test_adaptive_integration.py`:
+
+- 6 testes de ranking News (promoção important/positive, penalização negative, neutralidade, fail-safe de engine, curação post-promoção).
+- 4 testes de ranking Inbox (promoção, penalização, neutralidade, fail-safe).
+- 3 testes de contrato (Inbox shape, News shape, Briefing keys).
+- 2 testes de recálculo de priority (medium→high quando score cruza HIGH=8, medium→low quando cruza MEDIUM=4).
+- 1 teste de neutralidade sem feedback.
+- 1 teste de payload `_log_ranked_news` com `base_score` preservado.
+
+**Suíte completa pós-Etapa 3B:** 464/464 testes passam. Zero regressão em Inbox, News, Briefing, Finance, Telegram ou contratos públicos.
+
+**Backlog de Etapa 3B (registrado, não bloqueador):**
+
+- Extrair lógica de `effective_score` duplicada (closure em `summarize_emails` e `_effective_score` em `_build_top5`) para função de módulo — fazer junto com v2 quando lógica de ajuste evoluir.
+- Teste para fallback de `title` quando `item["link"]` está ausente em notícias.
+- Teste para URL > 32 chars (MD5 hash path de `to_callback_ref`) em contexto de integração adaptativa.
+- Clarificar return type de `_apply_memory_adjustments` para `None` (mutação pura) em refactor futuro.
+
+---
+
 ## 4. Decisões Arquiteturais Globais
 
 **Determinístico (sem IA):** Decisão deliberada para Fase 1. Comportamento previsível, depurável, sem infraestrutura adicional. Pontos de extensão para IA estão identificados no código (`TODO: [V4]`) mas não implementados.
@@ -304,17 +446,24 @@ A assinatura foi estendida com kwargs opcionais `source` e `event_type` para des
 
 ## 5. Próximas Etapas
 
-**Imediato — Uso real controlado:**
-- Observar proporção de itens `high`/`alta` nos primeiros dias
-- Verificar `by_category["ruido"]` para detectar falsos positivos de filtragem
-- Validar que os 3 artigos do topo do briefing são semanticamente relevantes
+**Imediato — Uso real + calibração contínua (pós-V3.2):**
 
-**Curto prazo — Calibração (V3.1):**
-- Ajuste fino de pesos e thresholds com base em dados reais de uso
+- Observar os 12 contadores em `log_action("summarize_news", …)` por execução: `raw_total`, `scope_pass_*`, `scope_fallback_relevant`, `scope_dropped`, `dedup_removed`, `simhash_dropped`, `high/medium/low`, `final_total`
+- Validar se `scope_fallback_relevant` está em volume razoável (sinal de calibração saudável: minoria comparada aos grupos explícitos)
+- Confirmar que o radar permanece populado em dias secos via fallback HIGH → MEDIUM → LOW
+- Continuar verificando `by_category["ruido"]` para detectar falsos positivos de filtragem
+- Validar que os artigos do topo do briefing são semanticamente relevantes
+
+**Curto prazo — Calibração baseada em dados reais:**
+
+- Ajuste fino de pesos e thresholds (`SCORE_THRESHOLD_HIGH=8`, `SCORE_THRESHOLD_MEDIUM=4`) com base na distribuição observada em `high/medium/low` dos logs
 - Possível refinamento de termos em `_NOISE` com base em falsos positivos observados
+- Avaliação de termos ambíguos do scope gate ("vale" bare term, "microsoft"/"apple" amplos no Group D) — substituir por formas não-ambíguas se gerarem ruído
 - Avaliação da proporção `alta` no email (risco de inflação por `"?"` em `_RESPONSE_SIGNALS`)
+- Calibração do threshold SimHash (10 bits → ~14–18 se near-duplicates semânticos chegarem ao briefing)
 
-**Médio prazo — V4:**
+**Médio prazo — Extensões previstas (`TODO: [V4]` no código):**
+
 - Sumarização de top artigos por LLM (substitui a string de summary)
 - Agrupamento temático de artigos por similaridade semântica
 - Score de credibilidade por fonte RSS
@@ -322,5 +471,7 @@ A assinatura foi estendida com kwargs opcionais `source` e `event_type` para des
 - Embedding similarity para artigos ambíguos (sem keyword match)
 
 **Estrutural (sem prazo definido):**
+
 - Extração do módulo de notícias para `app/modules/news/` quando o caso de uso de notícias independentes for necessário
 - Padronização de labels de prioridade entre email (`alta/media/baixa`) e news (`high/medium/low`)
+- Avaliação do acoplamento leve `tracked_scope → news_classifier` (import de `_*_RE` privados): se classifier mudar API interna, scope precisará acompanhar

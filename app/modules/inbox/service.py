@@ -5,6 +5,9 @@ Reads, classifies, and summarizes emails via the active email provider client.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Optional
+
 from app.core.config import settings
 from app.core.logging import get_logger, log_action
 from app.integrations.base_email_client import BaseEmailClient
@@ -17,6 +20,24 @@ from app.integrations.email_models import EmailMessage, email_to_dict
 from app.integrations.gmail_client import GmailClient
 
 logger = get_logger("services.inbox")
+
+
+@dataclass
+class InboxAdjustment:
+    """Internal-only carrier of adaptive scoring state for one email.
+
+    Held in a service-local dict during summarize_emails; never serialized to
+    the public payload. Fields:
+      base       — base score from EmailClassification.score (cast to float)
+      adjustment — feedback-derived delta from compute_memory_adjustment
+      reason     — feedback label that produced the adjustment, or None
+      final      — base + adjustment (used as the ranking key)
+    """
+    base: float
+    adjustment: float
+    reason: Optional[str]
+    final: float
+
 
 _FALLBACK_CLASSIFICATION = EmailClassification(
     category="update",
@@ -34,9 +55,85 @@ _FALLBACK_CLASSIFICATION = EmailClassification(
 _PRIORITY_ORDER: dict[str, int] = {"alta": 0, "media": 1, "baixa": 2}
 
 
+def _compute_email_adjustments(
+    emails: list[EmailMessage],
+    classifications: dict[str, EmailClassification],
+) -> dict[str, "InboxAdjustment"]:
+    """Compute memory adjustments for each email. Fail-safe — never raises.
+
+    Returns a dict keyed by email.id with InboxAdjustment(base, adjustment, reason,
+    final). Items missing from the dict default to neutral on lookup. Opens its
+    own DB session (out-of-band, like _log_email_classifications) so any failure
+    is isolated from the main inbox pipeline.
+
+    Per-item logs at DEBUG; one INFO line summarizing applied count per batch.
+    """
+    if not emails:
+        return {}
+    try:
+        from app.db.session import SessionLocal
+        from app.modules.memory.scoring import compute_memory_adjustment
+        from app.modules.memory.utils import to_callback_ref
+    except Exception as exc:
+        logger.warning("AdaptiveScore: imports falharam (inbox): %s", exc)
+        return {}
+
+    result: dict[str, InboxAdjustment] = {}
+    applied = 0
+    db = None
+    try:
+        db = SessionLocal()
+        for email in emails:
+            clf = classifications.get(email.id)
+            base = float(clf.score) if clf is not None else 0.0
+            try:
+                ref = to_callback_ref(email.id) if email.id else ""
+                if not ref:
+                    result[email.id] = InboxAdjustment(base, 0.0, None, base)
+                    continue
+                adj = compute_memory_adjustment(
+                    "email", ref, base, db_session=db
+                )
+                final = base + adj.adjustment
+                result[email.id] = InboxAdjustment(base, adj.adjustment, adj.reason, final)
+                if adj.adjustment != 0.0:
+                    applied += 1
+                    sign = "+" if adj.adjustment > 0 else ""
+                    logger.debug(
+                        "[AdaptiveScore] src=email ref=%s base=%.1f adj=%s%.1f final=%.1f",
+                        ref, base, sign, adj.adjustment, final,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "AdaptiveScore: falha por item (email=%s): %s", email.id, exc
+                )
+                result[email.id] = InboxAdjustment(base, 0.0, None, base)
+    except Exception as exc:
+        logger.warning("AdaptiveScore: sessão DB falhou (inbox): %s", exc)
+        # Best-effort neutral fill
+        for email in emails:
+            if email.id not in result:
+                clf = classifications.get(email.id)
+                base = float(clf.score) if clf is not None else 0.0
+                result[email.id] = InboxAdjustment(base, 0.0, None, base)
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:  # pragma: no cover — defensive
+                pass
+
+    if applied:
+        logger.info(
+            "Applied adaptive scoring to %d/%d items (Inbox)", applied, len(emails)
+        )
+    return result
+
+
 def _build_top5(
     emails: list[EmailMessage],
     classifications: dict[str, EmailClassification],
+    adjustments: dict[str, "InboxAdjustment"] | None = None,
 ) -> list[dict]:
     """Return up to 5 prioritized emails for Telegram executive view.
 
@@ -44,9 +141,12 @@ def _build_top5(
     - Exclude newsletter/noise (low-value content, spam-equivalent)
     - Exclude read emails with no operational signal (no response/deadline/follow-up/opportunity)
 
-    Ranking: priority (alta → media → baixa), then score descending, then original list
-    order (stable sort preserves client ordering — Gmail returns newest first).
+    Ranking: priority (alta → media → baixa), then effective score descending
+    (base score + memory adjustment), then original list order (stable sort
+    preserves client ordering — Gmail returns newest first).
     """
+    adj_map = adjustments or {}
+
     def _is_eligible(email: EmailMessage) -> bool:
         clf = classifications[email.id]
         if clf.category in ("newsletter", "noise"):
@@ -62,12 +162,18 @@ def _build_top5(
             return False
         return True
 
+    def _effective_score(email: EmailMessage) -> float:
+        a = adj_map.get(email.id)
+        if a is not None:
+            return a.final
+        return float(classifications[email.id].score)
+
     eligible = [e for e in emails if _is_eligible(e)]
     ranked = sorted(
         eligible,
         key=lambda e: (
             _PRIORITY_ORDER.get(classifications[e.id].priority, 2),
-            -classifications[e.id].score,
+            -_effective_score(e),
         ),
     )
 
@@ -195,6 +301,16 @@ class InboxService:
         classifications = _classify_all(emails)
         _log_email_classifications(emails, classifications)
 
+        # Adaptive scoring v1 (Etapa 3B): apply feedback-derived adjustments
+        # AFTER classification, BEFORE ranking. Fail-safe — neutral on any error.
+        adjustments = _compute_email_adjustments(emails, classifications)
+
+        def _final_score(email: EmailMessage) -> float:
+            a = adjustments.get(email.id)
+            if a is not None:
+                return a.final
+            return float(classifications[email.id].score)
+
         high = [e for e in emails if classifications[e.id].priority == "alta"]
         medium = [e for e in emails if classifications[e.id].priority == "media"]
         low = [e for e in emails if classifications[e.id].priority == "baixa"]
@@ -203,9 +319,9 @@ class InboxService:
             1 for e in emails if classifications[e.id].category == "newsletter"
         )
 
-        # action_items: emails requiring direct action, ordered by score descending.
-        # Hard exclusions: newsletter/noise (never require direct action) and
-        # promotional/marketing content detected via PROMOTIONAL_NOISE tag.
+        # action_items: emails requiring direct action, ordered by effective score
+        # descending (base score + memory adjustment). Hard exclusions unchanged:
+        # newsletter/noise and PROMOTIONAL_NOISE.
         action_emails = sorted(
             [
                 e for e in emails
@@ -218,7 +334,7 @@ class InboxService:
                     or classifications[e.id].is_opportunity
                 )
             ],
-            key=lambda e: -classifications[e.id].score,
+            key=lambda e: -_final_score(e),
         )
 
         summary = _build_summary(emails, classifications, unread)
@@ -232,7 +348,7 @@ class InboxService:
             "newsletter_count": newsletter_count,
             "items": [email_to_dict(e) for e in emails],
             "action_items": [email_to_dict(e) for e in action_emails],
-            "top5": _build_top5(emails, classifications),
+            "top5": _build_top5(emails, classifications, adjustments),
             "summary": summary,
         }
         log_action(

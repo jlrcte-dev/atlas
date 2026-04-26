@@ -232,8 +232,9 @@ class TelegramBot:
         # ── Block 2: News ─────────────────────────────────────────
         # news["summary"] already contains the "📰 Radar de Noticias" header
         b2: list[str] = [esc(news.get("summary", "")), ""]
+        _NEWS_ICON = {"high": "🔴", "medium": "🟡", "low": "⚪"}
         for item in news.get("items", []):
-            icon = "🔴" if item.get("priority") == "high" else "🟡"
+            icon = _NEWS_ICON.get(item.get("priority", ""), "⚪")
             b2.append(
                 f"{icon} {esc(item.get('title', ''))}"
                 f" <i>[{esc(item.get('category', ''))}]</i>"
@@ -422,6 +423,7 @@ class TelegramBot:
         if not items:
             return
 
+        _NEWS_ICON = {"high": "🔴", "medium": "🟡", "low": "⚪"}
         for item in items:
             try:
                 raw = item.get("link") or item.get("title", "") or ""
@@ -429,7 +431,7 @@ class TelegramBot:
                 if not ref:
                     continue
 
-                icon = "🔴" if item.get("priority") == "high" else "🟡"
+                icon = _NEWS_ICON.get(item.get("priority", ""), "⚪")
                 title = item.get("title", "") or "(sem titulo)"
                 short_title = (title[:77] + "…") if len(title) > 80 else title
                 category = item.get("category", "") or ""

@@ -1,6 +1,8 @@
 # Módulo Inbox / Email — Atlas AI Assistant
 
-> Documentação técnica oficial. Ciclo V1–V2 concluído. Última atualização: Abril 2026.
+> Documentação técnica oficial. Ciclo V1–V2 concluído. Última atualização: Abril 2026 (pós-V3.2 do módulo News).
+>
+> **Estado atual:** em uso real controlado. Calibração contínua baseada em dados depende de observação dos próximos dias — alinhado com a postura adotada para o módulo News (V3.1 e V3.2).
 
 ---
 
@@ -282,15 +284,21 @@ O objeto `_FALLBACK_CLASSIFICATION` em `inbox/service.py` é uma instância de `
 
 ## 7. Próximos Passos
 
-### Calibração com Uso Real (V2.1)
+### Estado Atual — Em Uso Real Controlado
+
+O módulo Inbox está em uso real controlado, alinhado com a postura adotada pelo módulo News após V3.1 e V3.2: o sistema é considerado funcionalmente correto e resiliente, mas a calibração definitiva de pesos e thresholds depende de observação prolongada com dados reais. Não há plano de mudança estrutural antes que essa observação aconteça.
+
+### Calibração baseada em dados reais (V2.1, em andamento)
 
 - Observar proporção de emails `"alta"` nos primeiros dias. Se > 60% do inbox (excluindo newsletter/noise) for `"alta"`, investigar `"?"` em `_RESPONSE_SIGNALS` como causa.
 - Avaliar se `"?"` deve ser substituído por sinais compostos mais específicos (`"aguardo sua resposta"`, `"pode me responder"`) para reduzir inflação de `"alta"`.
 - Monitorar `reason_codes=["classification_error"]` nos logs para detectar emails que disparam o fallback.
+- Considerar contadores de funil semelhantes aos adotados em `summarize_news` (V3.1) — tornar visível em uma linha de log a distribuição `total / alta / media / baixa / newsletter / noise / unread`. Auditoria similar ao que existe hoje no módulo News deve ser perseguida quando a calibração de email entrar na próxima iteração.
 
 ### Melhorias Candidatas (sem prazo definido)
 
 - **Análise de thread:** considerar o histórico da conversa para contextualizar um email de resposta.
 - **Remetentes conhecidos:** lista de remetentes sempre relevantes (independente de keywords) ou sempre irrelevantes.
-- **Padronização de labels:** alinhar `"alta/media/baixa"` com `"high/medium/low"` do módulo News para facilitar comparações futuras.
+- **Padronização de labels:** alinhar `"alta/media/baixa"` com `"high/medium/low"` do módulo News para facilitar comparações futuras (já listado como pendência estrutural em `milestones.md`).
 - **Score de credibilidade por domínio de remetente:** domínios corporativos conhecidos recebem bônus; domínios suspeitos recebem penalidade.
+- **Fallback de prioridade na exposição:** investigar se cabe no inbox uma lógica análoga ao fallback HIGH → MEDIUM → LOW da V3.1 do News (caso o top-N do briefing fique vazio em dias sem email `alta`). Ainda não validado como necessário em uso real — depende da distribuição observada.

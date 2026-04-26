@@ -74,6 +74,39 @@ Primeira camada de **inteligência controlada** sobre os módulos da Fase 1 — 
 
 **Cobertura:** 22 testes Memory + 36 testes Feedback Loop. Suite completa: 414/414. Cobertura: 81%. Zero regressão em Inbox, News/Briefing, Finance ou Telegram. Contratos públicos intactos.
 
+### ✅ Milestone 7 — Adaptive Score Engine v1 + Integration v1 (Fase 2A)
+
+Primeira camada de ranking adaptativo: feedbacks do usuário passam a influenciar a ordem das notícias e emails exibidos no briefing e no Telegram.
+
+**Etapa 3A — Adaptive Score Engine v1** (`app/modules/memory/scoring.py`):
+
+Motor isolado, read-only, determinístico. Lê `memory_events.feedback` e retorna um delta de score fixo:
+
+```
+positive  → +1.0
+important → +2.0
+negative  → -2.0
+sem feedback / evento ausente → 0.0 (neutro)
+```
+
+`MemoryAdjustment(adjustment, reason)` — dataclass de retorno. Fail-safe completo: qualquer exceção retorna neutro. Zero efeito colateral — nenhum módulo existente foi modificado nesta etapa.
+
+**Etapa 3B — Adaptive Score Integration v1** (Inbox + News):
+
+`final_score = base_score + memory_adjustment` aplicado em dois pipelines:
+
+- **Inbox** (`app/modules/inbox/service.py`): helper `_compute_email_adjustments` abre sessão DB out-of-band, computa ajustes para todos os emails e injeta `effective_score` nas ordenações de `action_items` e `top5`. `EmailClassification.score` (int) preservado intacto. Dataclass interno `InboxAdjustment(base, adjustment, reason, final)` nunca serializado.
+
+- **News** (`app/modules/briefing/news_service.py`): helper `_apply_memory_adjustments` inserido como Layer 7.5, antes de `_rank_items`, `_curate_top5` e `_diversify`. Muta itens in-place com campos `_`-prefixados (`_base_score`, `_memory_adjustment`, `_memory_reason`), auto-stripped em Layer 11. Recalcula `item["priority"]` quando score cruza threshold (`_derive_adjusted_priority`). Preserva `base_score` no payload de `_log_ranked_news` para analytics futuras.
+
+**Fail-safe em três camadas** (ambos os pipelines): imports lazy com try/except → try/except por item → fill neutro global em falha de sessão DB. Pipeline nunca quebra.
+
+**Observabilidade:** log DEBUG por item (`[AdaptiveScore] src=… base=… adj=… final=…`) apenas quando ajuste != 0; log INFO por batch (`Applied adaptive scoring to X/Y items`). Nenhum dado sensível exposto.
+
+**Audit pós-implementação:** auditoria formal executada. Veredito: aprovado com ressalvas. Quatro correções pontuais aplicadas antes do commit: (1) import morto removido, (2) blank line PEP 8, (3) recálculo de priority em News após ajuste, (4) base_score preservado no payload de memória.
+
+**Cobertura:** 10 testes Engine (scoring unit) + 17 testes Integration (ranking, contrato, fail-safe, priority boundary). Suite completa: 464/464. Zero regressão em Inbox, News/Briefing, Finance, Telegram ou contratos públicos.
+
 ---
 
 ## TRANSIÇÃO DE FASE

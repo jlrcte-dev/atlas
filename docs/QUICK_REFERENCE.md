@@ -318,6 +318,28 @@ callback_data ≤ 41 bytes (limite Telegram = 64)
 - **Webhook:** branch `fb:` curto-circuita antes do answer genérico para responder com toast específico
 - **`MemoryService.add_feedback(ref, feedback, *, source=None, event_type=None) -> bool`** — backward compatible
 
+### Adaptive Score Engine v1 + Integration v1 (Fase 2A · Etapas 3A e 3B)
+
+`app/modules/memory/scoring.py` — motor isolado, read-only, determinístico.
+
+```python
+# Ajuste por feedback
+positive  → +1.0  |  important → +2.0  |  negative → -2.0
+# Neutro quando: sem evento, sem feedback, valor desconhecido, qualquer erro
+
+MemoryAdjustment(adjustment: float, reason: Optional[str])
+compute_memory_adjustment(source, reference_id, base_score, *, db_session) -> MemoryAdjustment
+```
+
+**Integração ativa em:**
+
+- **Inbox** — `_compute_email_adjustments` (helper out-of-band) aplica `final_score = base + adj` nas ordenações de `action_items` e `top5`. `EmailClassification.score` (int) intacto.
+- **News** — `_apply_memory_adjustments` (Layer 7.5) aplica ajuste antes do ranking, curadoria e diversificação. Recalcula `item["priority"]` quando score cruza threshold. Preserva `_base_score` no item e no payload de memória.
+
+**Fail-safe:** três camadas em cada pipeline (imports → item → sessão DB). Nunca quebra o pipeline.
+
+**Observabilidade:** `[AdaptiveScore] src= ref= base= adj= final=` (DEBUG, por item, apenas quando adj≠0) + `Applied adaptive scoring to X/Y items` (INFO, por batch).
+
 ### Backlog conhecido (Fase 2A)
 
 ```text
@@ -327,5 +349,16 @@ callback_data ≤ 41 bytes (limite Telegram = 64)
 □ Avaliar mover to_callback_ref para app/core (acoplamento integrations → modules)
 □ Diferenciar "evento inexistente" de "erro interno" no retorno de add_feedback
 □ Feedback no briefing consolidado (format_briefing_blocks)
-□ Score adaptativo v1 (próxima etapa da Fase 2A)
+
+[Backlog 3B — próximas iterações]
+□ Extrair effective_score duplicado (closure summarize_emails + _build_top5) para função de módulo
+□ Teste: fallback de title quando news item não tem link
+□ Teste: URL longa (>32 chars) via hash path em integração adaptativa
+□ Clarificar return type de _apply_memory_adjustments para None (mutação pura)
+
+[Futuro — Adaptive Score v2]
+□ Agregação de múltiplos feedbacks por item
+□ Decaimento temporal (feedbacks antigos pesam menos)
+□ Aprendizado por categoria/source (não por item individual)
+□ Perfil de usuário (interesses persistentes)
 ```
